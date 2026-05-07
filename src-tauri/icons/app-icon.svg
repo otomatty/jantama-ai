@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f3d2e"/>
+      <stop offset="100%" stop-color="#1f6f4a"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="180" ry="180" fill="url(#bg)"/>
+  <rect x="232" y="172" width="560" height="680" rx="64" ry="64" fill="#fafaf5" stroke="#1d3a2a" stroke-width="14"/>
+  <g fill="#1d3a2a" font-family="'Yu Gothic', 'Hiragino Sans', sans-serif" font-weight="900" text-anchor="middle">
+    <text x="512" y="540" font-size="360">À</text>
+    <text x="512" y="780" font-size="120">JAN</text>
+  </g>
+</svg>

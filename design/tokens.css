@@ -1,0 +1,158 @@
+/* =========================================================
+   Acial Design — Design Tokens
+   --------------------------------------------------------- */
+
+/* Local Noto Sans JP (variable, brand-supplied) */
+@font-face {
+  font-family: "Noto Sans JP";
+  src: url("fonts/NotoSansJP-VariableFont_wght.ttf") format("truetype-variations"),
+       url("fonts/NotoSansJP-VariableFont_wght.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Latin sibling + mono via Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  /* ── Brand: the Acial Gradient ───────────────────── */
+  --acial-blue:        #0432FF;
+  --acial-red:         #FF2600;
+  --gradient-acial:    linear-gradient(135deg, #0432FF 0%, #FF2600 100%);
+  --gradient-acial-soft: linear-gradient(135deg, rgba(4,50,255,0.10) 0%, rgba(255,38,0,0.10) 100%);
+  --gradient-acial-halo: radial-gradient(60% 60% at 30% 40%, rgba(4,50,255,0.18) 0%, transparent 60%),
+                         radial-gradient(50% 50% at 80% 70%, rgba(255,38,0,0.14) 0%, transparent 60%);
+
+  /* ── Brand color steps (derived) ─────────────────── */
+  --blue-50:   #EEF1FF;
+  --blue-100:  #D7DEFF;
+  --blue-300:  #6E7FFF;
+  --blue-500:  #0432FF;
+  --blue-700:  #0024C7;
+  --blue-900:  #001280;
+
+  --red-50:    #FFEEE9;
+  --red-100:   #FFD3C7;
+  --red-300:   #FF7A5C;
+  --red-500:   #FF2600;
+  --red-700:   #C71B00;
+  --red-900:   #800F00;
+
+  /* ── Neutrals (warm, slightly off-white) ─────────── */
+  --ink-900:   #0F0F1E;   /* primary text */
+  --ink-800:   #1F1F2E;
+  --ink-700:   #34344A;
+  --ink-600:   #545468;   /* secondary text */
+  --ink-500:   #7A7A8C;
+  --ink-400:   #A0A0AE;
+  --ink-300:   #C8C7CF;   /* hint / disabled */
+  --ink-200:   #E6E5DF;   /* default border */
+  --ink-100:   #F2F1EC;   /* hairline / subtle bg */
+  --ink-50:    #FAFAF7;   /* canvas */
+  --white:     #FFFFFF;
+
+  /* ── Semantic ─────────────────────────────────────── */
+  --success:   #138A4F;
+  --success-bg:#E5F6EC;
+  --warning:   #B8740A;
+  --warning-bg:#FFF3DC;
+  --danger:    #C71B00;
+  --danger-bg: #FFEEE9;
+  --info:      #0024C7;
+  --info-bg:   #EEF1FF;
+
+  /* ── Foreground / background semantic aliases ────── */
+  --bg-canvas: var(--ink-50);
+  --bg-surface:var(--white);
+  --bg-subtle: var(--ink-100);
+  --fg-1:      var(--ink-900);
+  --fg-2:      var(--ink-600);
+  --fg-3:      var(--ink-500);
+  --fg-on-grad:var(--white);
+  --border-1:  var(--ink-200);
+  --border-2:  var(--ink-100);
+
+  /* ── Radii ────────────────────────────────────────── */
+  --radius-0:  0;
+  --radius-1:  6px;     /* inputs, buttons */
+  --radius-2:  12px;    /* cards */
+  --radius-3:  20px;    /* hero modules */
+  --radius-pill: 999px;
+
+  /* ── Spacing scale (4px base) ─────────────────────── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  24px;
+  --space-6:  32px;
+  --space-7:  48px;
+  --space-8:  64px;
+  --space-9:  96px;
+  --space-10: 128px;
+
+  /* ── Elevation ────────────────────────────────────── */
+  --shadow-1: 0 1px 2px rgba(15,15,30,0.04), 0 0 0 1px rgba(15,15,30,0.03);
+  --shadow-2: 0 4px 16px rgba(15,15,30,0.06), 0 1px 2px rgba(15,15,30,0.04);
+  --shadow-3: 0 12px 40px rgba(15,15,30,0.08), 0 2px 6px rgba(15,15,30,0.04);
+  --shadow-focus: 0 0 0 3px rgba(4,50,255,0.25);
+
+  /* ── Type families ────────────────────────────────── */
+  --font-jp:   "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", system-ui, sans-serif;
+  --font-sans: "Inter", "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ── Type scale ───────────────────────────────────── */
+  --text-display-1: 800 72px/1.05 var(--font-sans);
+  --text-display-2: 800 56px/1.08 var(--font-sans);
+  --text-h1:        700 40px/1.15 var(--font-jp);
+  --text-h2:        700 32px/1.20 var(--font-jp);
+  --text-h3:        700 24px/1.30 var(--font-jp);
+  --text-h4:        700 20px/1.35 var(--font-jp);
+  --text-lead:      400 20px/1.55 var(--font-jp);
+  --text-body:      400 16px/1.70 var(--font-jp);
+  --text-body-sm:   400 14px/1.60 var(--font-jp);
+  --text-caption:   500 12px/1.40 var(--font-sans);
+  --text-overline:  700 12px/1.20 var(--font-sans); /* uppercase, tracked */
+  --text-mono:      400 14px/1.50 var(--font-mono);
+
+  /* ── Motion ───────────────────────────────────────── */
+  --ease-out:    cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast:    150ms;
+  --dur-base:    250ms;
+  --dur-slow:    400ms;
+}
+
+/* ── Semantic element defaults ─────────────────────── */
+html, body {
+  background: var(--bg-canvas);
+  color: var(--fg-1);
+  font: var(--text-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1 { font: var(--text-h1); letter-spacing: -0.02em; }
+h2 { font: var(--text-h2); letter-spacing: -0.015em; }
+h3 { font: var(--text-h3); letter-spacing: -0.01em; }
+h4 { font: var(--text-h4); }
+p  { font: var(--text-body); color: var(--fg-1); }
+small { font: var(--text-body-sm); color: var(--fg-2); }
+code, pre { font: var(--text-mono); }
+
+.text-display-1 { font: var(--text-display-1); letter-spacing: -0.03em; }
+.text-display-2 { font: var(--text-display-2); letter-spacing: -0.025em; }
+.text-lead      { font: var(--text-lead); color: var(--fg-2); }
+.text-overline  { font: var(--text-overline); letter-spacing: 0.18em; text-transform: uppercase; color: var(--fg-2); }
+.text-caption   { font: var(--text-caption); color: var(--fg-3); }
+
+.gradient-text {
+  background: var(--gradient-acial);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.gradient-bg { background: var(--gradient-acial); color: var(--fg-on-grad); }
+.gradient-bar { height: 3px; background: var(--gradient-acial); border-radius: 999px; }

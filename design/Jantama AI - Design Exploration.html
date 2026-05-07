@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>雀魂AIアシスタント — Design Exploration</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="tokens.css" />
+<style>
+  html, body { margin: 0; padding: 0; background: var(--ink-100); }
+  * { box-sizing: border-box; }
+  @keyframes jt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* settings + state-stub helpers */
+  .stub-screen {
+    width: 480; height: 720; background: var(--bg-canvas); border-radius: 12;
+    border: 1px solid var(--border-1);
+    box-shadow: 0 24px 60px rgba(15,15,30,0.14);
+    display: flex; flex-direction: column; overflow: hidden;
+    font-family: var(--font-jp);
+  }
+</style>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="tile.jsx"></script>
+<script type="text/babel" src="scenarios.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+
+<script type="text/babel">
+const { useState } = React;
+
+// Settings screen mock
+function SettingsScreen() {
+  return (
+    <div className="stub-screen" style={{ width: 480, height: 720 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px',
+        borderBottom: '1px solid var(--border-1)', background: 'var(--white)',
+      }}>
+        <button style={{
+          width: 28, height: 28, border: '1px solid var(--border-1)', borderRadius: 6,
+          background: 'var(--white)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <h2 style={{ font: 'var(--text-h4)', margin: 0 }}>設定</h2>
+      </div>
+      <div style={{ padding: 16, flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}>
+        <SettingGroup label="キャプチャ対象">
+          <SelectField value="雀魂 - Mahjong Soul (Steam)" />
+          <Hint>起動中のウィンドウから選択</Hint>
+        </SettingGroup>
+        <SettingGroup label="Mortal モデル">
+          <FileField value="mortal-2024-12.pth" path="C:\Users\akimasa\models\" />
+        </SettingGroup>
+        <SettingGroup label="推論バックエンド">
+          <SegmentedField options={['ROCm', 'CPU フォールバック']} active={0} />
+          <Hint>ROCm 7.2.1 (Radeon 860M) ・ public preview</Hint>
+        </SettingGroup>
+        <SettingGroup label="LLM 推奨理由">
+          <ToggleField on />
+          <Hint>S-01 — Claude Haiku で打牌理由を生成</Hint>
+        </SettingGroup>
+        <SettingGroup label="危険牌・安全牌の表示">
+          <ToggleField on />
+          <Hint>S-02 — 他家リーチ時に常時表示</Hint>
+        </SettingGroup>
+        <SettingGroup label="データ保存期間">
+          <RetentionRow label="推論履歴" days={30} />
+          <RetentionRow label="牌画像サンプル" days={7} />
+          <RetentionRow label="エラーログ" days={90} />
+        </SettingGroup>
+      </div>
+      <div style={{
+        padding: 12, background: 'var(--white)', borderTop: '1px solid var(--border-1)',
+        display: 'flex', gap: 8,
+      }}>
+        <button style={{ flex: 1, padding: '12px', borderRadius: 8, border: '1px solid var(--border-1)', background: 'var(--white)', cursor: 'pointer', fontFamily: 'var(--font-jp)', fontWeight: 600 }}>キャンセル</button>
+        <button style={{ flex: 1, padding: '12px', borderRadius: 8, border: 'none', background: 'var(--gradient-acial)', color: '#fff', cursor: 'pointer', fontFamily: 'var(--font-jp)', fontWeight: 700 }}>保存</button>
+      </div>
+    </div>
+  );
+}
+
+function SettingGroup({ label, children }) {
+  return (
+    <div>
+      <div style={{ font: 'var(--text-overline)', color: 'var(--ink-500)', marginBottom: 6 }}>{label}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>{children}</div>
+    </div>
+  );
+}
+function SelectField({ value }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '10px 12px', border: '1px solid var(--border-1)', borderRadius: 6, background: 'var(--white)',
+      fontFamily: 'var(--font-jp)', fontSize: 13,
+    }}>
+      <span>{value}</span>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+  );
+}
+function FileField({ value, path }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '10px 12px', border: '1px solid var(--border-1)', borderRadius: 6, background: 'var(--white)',
+    }}>
+      <div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--ink-900)' }}>{value}</div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-500)' }}>{path}</div>
+      </div>
+      <button style={{ padding: '4px 10px', border: '1px solid var(--border-1)', borderRadius: 4, background: 'var(--white)', fontSize: 11, cursor: 'pointer', fontFamily: 'var(--font-jp)' }}>変更</button>
+    </div>
+  );
+}
+function SegmentedField({ options, active }) {
+  return (
+    <div style={{ display: 'inline-flex', padding: 3, background: 'var(--ink-100)', borderRadius: 6, gap: 2 }}>
+      {options.map((o, i) => (
+        <button key={i} style={{
+          padding: '6px 12px', border: 'none', borderRadius: 4,
+          background: i === active ? 'var(--white)' : 'transparent',
+          boxShadow: i === active ? 'var(--shadow-1)' : 'none',
+          fontFamily: 'var(--font-jp)', fontSize: 12, fontWeight: 600,
+          color: i === active ? 'var(--ink-900)' : 'var(--ink-500)', cursor: 'pointer',
+        }}>{o}</button>
+      ))}
+    </div>
+  );
+}
+function ToggleField({ on }) {
+  return (
+    <div style={{
+      display: 'inline-flex', width: 38, height: 22, borderRadius: 999,
+      padding: 2, background: on ? 'var(--ink-900)' : 'var(--ink-200)',
+      transition: 'background 0.2s',
+    }}>
+      <div style={{ width: 18, height: 18, borderRadius: 999, background: '#fff', marginLeft: on ? 16 : 0, transition: 'margin 0.2s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }} />
+    </div>
+  );
+}
+function Hint({ children }) {
+  return <div style={{ fontSize: 11, color: 'var(--ink-500)', fontFamily: 'var(--font-jp)' }}>{children}</div>;
+}
+function RetentionRow({ label, days }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', border: '1px solid var(--border-1)', borderRadius: 6, background: 'var(--white)' }}>
+      <span style={{ fontFamily: 'var(--font-jp)', fontSize: 13 }}>{label}</span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--ink-700)' }}>{days} 日</span>
+    </div>
+  );
+}
+
+// Edge states
+function IdleScreen() {
+  return (
+    <div className="stub-screen" style={{ width: 480, height: 720, alignItems: 'stretch' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 32, textAlign: 'center', gap: 16 }}>
+        <div style={{ width: 80, height: 80, borderRadius: 999, background: 'var(--ink-100)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--ink-500)" strokeWidth="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        </div>
+        <div style={{ font: 'var(--text-h3)', color: 'var(--ink-900)' }}>対局を待機中</div>
+        <div style={{ font: 'var(--text-body-sm)', color: 'var(--ink-600)', maxWidth: 280 }}>雀魂のウィンドウを監視しています。自分の手番が来ると、ここに推奨アクションを表示します。</div>
+        <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
+          {[0, 1, 2].map(i => (
+            <span key={i} style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--ink-300)', animation: `jt-pulse 1.4s ease-in-out ${i * 0.2}s infinite` }} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ErrorScreen() {
+  return (
+    <div className="stub-screen" style={{ width: 480, height: 720 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 32, textAlign: 'center', gap: 14 }}>
+        <div style={{ width: 64, height: 64, borderRadius: 999, background: 'var(--danger-bg)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--danger)' }}>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
+        <div style={{ font: 'var(--text-h4)', color: 'var(--ink-900)' }}>キャプチャ対象が見つかりません</div>
+        <div style={{ font: 'var(--text-body-sm)', color: 'var(--ink-600)', maxWidth: 300 }}>「雀魂 - Mahjong Soul」ウィンドウを再検出しています。雀魂が起動しているかご確認ください。</div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+          <button style={{ padding: '8px 14px', borderRadius: 6, border: '1px solid var(--border-1)', background: 'var(--white)', fontFamily: 'var(--font-jp)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>再検出</button>
+          <button style={{ padding: '8px 14px', borderRadius: 6, border: 'none', background: 'var(--ink-900)', color: '#fff', fontFamily: 'var(--font-jp)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>設定を開く</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Coverpage / system block
+function Cover() {
+  return (
+    <div style={{
+      width: 1120, padding: '48px 52px',
+      background: 'var(--white)', borderRadius: 16, border: '1px solid var(--border-1)',
+      display: 'flex', flexDirection: 'column', gap: 16, fontFamily: 'var(--font-jp)',
+      position: 'relative', overflow: 'hidden',
+    }}>
+      <div style={{ position: 'absolute', inset: 0, background: 'var(--gradient-acial-halo)', opacity: 0.6, pointerEvents: 'none' }} />
+      <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ font: 'var(--text-overline)', color: 'var(--ink-500)' }}>JANTAMA · AI ASSISTANT</span>
+        <span style={{ width: 1, height: 12, background: 'var(--border-1)' }} />
+        <span style={{ font: 'var(--text-overline)', color: 'var(--ink-500)' }}>v1.0 / MVP</span>
+      </div>
+      <h1 style={{ margin: 0, fontSize: 56, lineHeight: 1.05, letterSpacing: '-0.025em', fontFamily: 'var(--font-jp)', fontWeight: 800, position: 'relative' }}>
+        雀魂で、<span className="gradient-text">最善手</span>を、<br />リアルタイムに。
+      </h1>
+      <p style={{ margin: 0, font: 'var(--text-lead)', maxWidth: 720, position: 'relative' }}>
+        画面キャプチャと Mortal 推論を直結し、自分の手番でだけ、推奨アクションと期待値を 3 秒以内に表示する Windows デスクトップアプリ。本ファイルは MVP のメイン画面・設定画面・各状態・3 通りの推奨レイアウトを並べた検討用キャンバス。
+      </p>
+      <div style={{ position: 'relative', display: 'flex', gap: 32, marginTop: 16, paddingTop: 18, borderTop: '1px solid var(--border-1)', flexWrap: 'wrap' }}>
+        {[
+          ['寸法', '480 × 720 px (compact)'],
+          ['推奨レイアウト', '3 種 (hero / compare / mini)'],
+          ['シナリオ', '4 種 (打牌 / リーチ / 鳴き / 和了)'],
+          ['Should 機能', 'S-01 (LLM理由) + S-02 (危険・安全)'],
+          ['ブランド', 'Acial Design (135° gradient · 単色UI)'],
+          ['牌描画', 'SVG フラットスタイル (自前)'],
+        ].map(([k, v]) => (
+          <div key={k}>
+            <div style={{ font: 'var(--text-overline)', color: 'var(--ink-500)', marginBottom: 4 }}>{k}</div>
+            <div style={{ font: 'var(--text-body-sm)', fontWeight: 700, color: 'var(--ink-900)' }}>{v}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Tile sheet — show off SVG tile rendering
+function TileSheet() {
+  const rows = [
+    { label: '萬子', tiles: ['1m','2m','3m','4m','5m','6m','7m','8m','9m'] },
+    { label: '筒子', tiles: ['1p','2p','3p','4p','5p','6p','7p','8p','9p'] },
+    { label: '索子', tiles: ['1s','2s','3s','4s','5s','6s','7s','8s','9s'] },
+    { label: '字牌', tiles: ['1z','2z','3z','4z','5z','6z','7z'] },
+  ];
+  return (
+    <div style={{
+      width: 1120, padding: '32px 36px',
+      background: 'var(--white)', borderRadius: 16, border: '1px solid var(--border-1)',
+      fontFamily: 'var(--font-jp)',
+    }}>
+      <div style={{ font: 'var(--text-overline)', color: 'var(--ink-500)', marginBottom: 6 }}>TILE LIBRARY</div>
+      <h2 style={{ margin: '0 0 20px', font: 'var(--text-h3)' }}>SVG 牌画 — フラットスタイル</h2>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+        {rows.map(r => (
+          <div key={r.label} style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <div style={{ width: 60, font: 'var(--text-body-sm)', color: 'var(--ink-600)', fontWeight: 600 }}>{r.label}</div>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {r.tiles.map(t => <Tile key={t} code={t} size="md" />)}
+            </div>
+          </div>
+        ))}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 8, paddingTop: 16, borderTop: '1px dashed var(--border-1)' }}>
+          <div style={{ width: 60, font: 'var(--text-body-sm)', color: 'var(--ink-600)', fontWeight: 600 }}>状態</div>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+              <Tile code="5p" size="md" red />
+              <span style={{ fontSize: 10, color: 'var(--ink-500)' }}>赤ドラ</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+              <Tile code="5p" size="md" highlight />
+              <span style={{ fontSize: 10, color: 'var(--ink-500)' }}>推奨</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+              <Tile code="5p" size="md" dim />
+              <span style={{ fontSize: 10, color: 'var(--ink-500)' }}>非アクティブ</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+              <Tile code="5p" size="md" ghost />
+              <span style={{ fontSize: 10, color: 'var(--ink-500)' }}>ゴースト</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+              <Tile back size="md" />
+              <span style={{ fontSize: 10, color: 'var(--ink-500)' }}>裏</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Layout label
+function ArtboardCard({ children }) {
+  return <div style={{ display: 'inline-block' }}>{children}</div>;
+}
+
+function App() {
+  return (
+    <DesignCanvas title="雀魂AIアシスタント / MVP デザイン検討" subtitle="Akimasa · 2026-05-07 · ペルソナ: 開発者本人 / 環境: Windows + Ryzen AI 300 + Radeon 860M">
+      <DCSection id="cover" title="01 — Cover & System">
+        <DCArtboard id="cover-card" label="プロジェクト概要" width={1120} height={400}>
+          <Cover />
+        </DCArtboard>
+        <DCArtboard id="tile-sheet" label="SVG 牌画ライブラリ" width={1120} height={520}>
+          <TileSheet />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="hero" title="02 — Layout A · Hero (推奨を1枚で大きく)">
+        <DCArtboard id="hero-dahai" label="打牌 (6m を切る)" width={480} height={720}>
+          <JantamaApp state="dahai" layout="hero" showReason showDanger />
+        </DCArtboard>
+        <DCArtboard id="hero-riichi" label="リーチ宣言" width={480} height={720}>
+          <JantamaApp state="riichi" layout="hero" showReason />
+        </DCArtboard>
+        <DCArtboard id="hero-fuuro" label="鳴き判断 (スルー推奨)" width={480} height={720}>
+          <JantamaApp state="fuuro" layout="hero" showReason />
+        </DCArtboard>
+        <DCArtboard id="hero-agari" label="和了判断 (ロン)" width={480} height={720}>
+          <JantamaApp state="agari" layout="hero" showReason />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="compare" title="03 — Layout B · Compare (上位 3 候補を横並び)">
+        <DCArtboard id="cmp-dahai" label="打牌 — 3候補比較" width={480} height={720}>
+          <JantamaApp state="dahai" layout="compare" showReason showDanger />
+        </DCArtboard>
+        <DCArtboard id="cmp-riichi" label="リーチ vs ダマ" width={480} height={720}>
+          <JantamaApp state="riichi" layout="compare" showReason />
+        </DCArtboard>
+        <DCArtboard id="cmp-fuuro" label="スルー / ポン / チー" width={480} height={720}>
+          <JantamaApp state="fuuro" layout="compare" showReason />
+        </DCArtboard>
+        <DCArtboard id="cmp-agari" label="ロン vs 見逃し" width={480} height={720}>
+          <JantamaApp state="agari" layout="compare" showReason />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="mini" title="04 — Layout C · Mini (情報密度最大・サブモニタ向け)">
+        <DCArtboard id="mini-dahai" label="打牌 — 高密度" width={480} height={720}>
+          <JantamaApp state="dahai" layout="mini" showReason showDanger />
+        </DCArtboard>
+        <DCArtboard id="mini-riichi" label="リーチ — 高密度" width={480} height={720}>
+          <JantamaApp state="riichi" layout="mini" showReason />
+        </DCArtboard>
+        <DCArtboard id="mini-fuuro" label="鳴き — 高密度" width={480} height={720}>
+          <JantamaApp state="fuuro" layout="mini" showReason />
+        </DCArtboard>
+        <DCArtboard id="mini-agari" label="和了 — 高密度" width={480} height={720}>
+          <JantamaApp state="agari" layout="mini" showReason />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="other" title="05 — その他の状態 & 設定画面">
+        <DCArtboard id="settings" label="設定画面 (SCR-02)" width={480} height={720}>
+          <SettingsScreen />
+        </DCArtboard>
+        <DCArtboard id="idle" label="待機中 (盤面なし)" width={480} height={720}>
+          <IdleScreen />
+        </DCArtboard>
+        <DCArtboard id="error" label="エラー (ウィンドウ消失)" width={480} height={720}>
+          <ErrorScreen />
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

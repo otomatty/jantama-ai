@@ -1,0 +1,91 @@
+# =====================================================
+# OS
+# =====================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =====================================================
+# IDE / Editor
+# =====================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursorignore
+
+# =====================================================
+# Node / Vite / TypeScript
+# =====================================================
+node_modules/
+dist/
+dist-ssr/
+.cache/
+.parcel-cache/
+.turbo/
+*.local
+
+# Testing
+coverage/
+.nyc_output/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =====================================================
+# Tauri / Rust
+# =====================================================
+src-tauri/target/
+src-tauri/gen/
+src-tauri/Cargo.lock
+src-tauri/WixTools/
+
+# =====================================================
+# Python (uv / venv)
+# =====================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.eggs/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist-py/
+
+# PyInstaller
+*.spec
+!python/*.spec.template
+
+# =====================================================
+# 雀魂AIアシスタント 固有
+# =====================================================
+# Mortal モデル (大容量・ライセンス都合で git 管理しない)
+*.pth
+*.pt
+
+# 牌画像サンプル (PRD §4.1 F-12 で 7 日で削除する一時ファイル)
+data/tile_images/
+
+# SQLite DB / 設定ファイルは tauri が AppData 配下に作るので無視
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# 環境変数
+.env
+.env.*
+!.env.example
