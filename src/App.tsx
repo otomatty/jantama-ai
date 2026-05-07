@@ -7,8 +7,14 @@ import { loadSettings } from "@/lib/tauriCommands";
 type Screen = "main" | "settings";
 
 function App() {
-  const { state, setPhase, setSettings, setMonitoring, setInference } =
-    useAppState();
+  const {
+    state,
+    setPhase,
+    setSettings,
+    setMonitoring,
+    setInference,
+    setBoard,
+  } = useAppState();
   const [screen, setScreen] = useState<Screen>("main");
 
   // 起動時に保存済み設定を読み込む
@@ -53,14 +59,19 @@ function App() {
       onMonitoringChange={(watching) => {
         setMonitoring({
           watching,
-          capture_target_window_title: state.settings.capture_target_window_title,
+          capture_target_window_title:
+            state.settings.capture_target_window_title,
           last_recognized_at: watching ? new Date().toISOString() : null,
         });
-        if (!watching) setInference(null);
+        if (!watching) {
+          setInference(null);
+          setBoard(null);
+        }
       }}
-      onInferenceUpdate={(result) => {
-        setInference(result);
-        setMonitoring({ last_recognized_at: result.timestamp });
+      onInferenceUpdate={(inference, board) => {
+        setInference(inference);
+        setBoard(board);
+        setMonitoring({ last_recognized_at: inference.timestamp });
       }}
     />
   );

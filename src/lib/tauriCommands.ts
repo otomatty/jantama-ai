@@ -9,8 +9,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   CaptureWindow,
+  GameBoardSummary,
   InferenceResult,
 } from "@/types";
+import { nextStubScenario } from "@/lib/scenarios";
 
 function isTauri(): boolean {
   const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
@@ -25,7 +27,7 @@ export async function listCaptureWindows(): Promise<CaptureWindow[]> {
     return [
       {
         id: "stub-1",
-        title: "雀魂 -じゃんたま- (Steam)",
+        title: "雀魂 - Mahjong Soul (Steam)",
         app_name: "jantama.exe",
         is_minimized: false,
       },
@@ -69,22 +71,17 @@ export async function stopMonitoring(): Promise<void> {
 
 /**
  * デバッグ・E2E 確認用: ダミー推論を 1 回実行して結果を返す。
+ * ブラウザ実行時は scenarios のローテーションを返す。
  */
-export async function runStubInference(): Promise<InferenceResult> {
+export async function runStubInference(): Promise<{
+  inference: InferenceResult;
+  board: GameBoardSummary;
+}> {
   if (!isTauri()) {
-    return {
-      recommended: {
-        tile: "6m",
-        action_type: "discard",
-        expected_value: 0.32,
-      },
-      candidates: [
-        { tile: "6m", action_type: "discard", expected_value: 0.32 },
-        { tile: "9p", action_type: "discard", expected_value: 0.18 },
-        { tile: "1z", action_type: "discard", expected_value: -0.05 },
-      ],
-      timestamp: new Date().toISOString(),
-    };
+    return nextStubScenario();
   }
-  return invoke<InferenceResult>("run_stub_inference");
+  const inference = await invoke<InferenceResult>("run_stub_inference");
+  // バックエンドが盤面サマリも一緒に返すようになるまでは scenarios のものを併用
+  const fallback = nextStubScenario();
+  return { inference, board: fallback.board };
 }

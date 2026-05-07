@@ -20,10 +20,15 @@ export type AppPhase =
 // 設定 (AppSettings) - PRD §6.2
 // ============================================================
 
+export type InferenceBackend = "rocm" | "cpu";
+
 export interface AppSettings {
   capture_target_window_id: string | null;
   capture_target_window_title: string | null;
   mortal_model_path: string | null;
+  inference_backend: InferenceBackend;
+  show_llm_reason: boolean;
+  show_danger_safe: boolean;
   window_position: { x: number; y: number } | null;
   window_size: { width: number; height: number } | null;
   data_retention_days: {
@@ -38,6 +43,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   capture_target_window_id: null,
   capture_target_window_title: null,
   mortal_model_path: null,
+  inference_backend: "rocm",
+  show_llm_reason: true,
+  show_danger_safe: true,
   window_position: null,
   window_size: null,
   data_retention_days: {
@@ -76,17 +84,34 @@ export type ActionType =
 export interface RecommendationCandidate {
   /** 牌表記 (例: "6m", "1z") またはアクション識別子 */
   tile?: string;
+  /** 表示用アクション名 (例: "リーチ" / "ダマ" / "スルー") */
+  action_label?: string;
   action_type: ActionType;
   expected_value: number;
-  /** 任意の補足文字列 (例: "鳴き対象牌: 5p") */
+  /** 確信度 (0..1) */
+  probability?: number;
+  /** 任意の補足文字列 */
   detail?: string;
 }
 
+export interface DangerTile {
+  tile: string;
+  level: "high" | "mid" | "low";
+}
+
 export interface InferenceResult {
-  recommended: RecommendationCandidate;
-  candidates: RecommendationCandidate[];
   /** 推論実行時刻 (ISO8601) */
   timestamp: string;
+  recommended: RecommendationCandidate;
+  candidates: RecommendationCandidate[];
+  /** プライマリ表示文 (例: "6m を切る") */
+  primary_label?: string;
+  /** LLM 生成の打牌理由 (S-01) */
+  reason?: string;
+  /** S-02: 危険牌 */
+  danger?: DangerTile[];
+  /** S-02: 安全牌 */
+  safe?: string[];
 }
 
 // ============================================================
@@ -99,6 +124,10 @@ export interface GameBoardSummary {
   round_wind: "東" | "南" | "西" | "北";
   turn: number;
   dora_indicators: string[];
+  /** 持ち点 */
+  score?: number;
+  /** 局名 (例: "東1局") */
+  round_label?: string;
 }
 
 // ============================================================

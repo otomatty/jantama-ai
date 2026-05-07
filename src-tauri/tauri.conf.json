@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "雀魂AIアシスタント",
-        "width": 900,
-        "height": 700,
-        "minWidth": 600,
-        "minHeight": 500,
+        "width": 480,
+        "height": 720,
+        "minWidth": 420,
+        "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
         "decorations": true

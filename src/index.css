@@ -1,92 +1,164 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
-/* shadcn/ui v4 用のテーマ変数定義 */
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+/* =========================================================
+   Acial Design — Design Tokens for Jantama AI
+   --------------------------------------------------------- */
+
+/* Local Noto Sans JP (variable, brand-supplied) */
+@font-face {
+  font-family: "Noto Sans JP";
+  src: url("/fonts/NotoSansJP-VariableFont_wght.ttf") format("truetype-variations"),
+       url("/fonts/NotoSansJP-VariableFont_wght.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
 }
 
+/* ── Tailwind 4 theme: token-driven utilities ───────────── */
+@theme {
+  --font-jp: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", system-ui, sans-serif;
+  --font-sans: "Inter", "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Brand */
+  --color-acial-blue: #0432FF;
+  --color-acial-red: #FF2600;
+
+  /* Brand color steps */
+  --color-blue-50: #EEF1FF;
+  --color-blue-100: #D7DEFF;
+  --color-blue-300: #6E7FFF;
+  --color-blue-500: #0432FF;
+  --color-blue-700: #0024C7;
+  --color-blue-900: #001280;
+
+  --color-red-50: #FFEEE9;
+  --color-red-100: #FFD3C7;
+  --color-red-300: #FF7A5C;
+  --color-red-500: #FF2600;
+  --color-red-700: #C71B00;
+  --color-red-900: #800F00;
+
+  /* Neutrals (warm, slightly off-white) */
+  --color-ink-900: #0F0F1E;
+  --color-ink-800: #1F1F2E;
+  --color-ink-700: #34344A;
+  --color-ink-600: #545468;
+  --color-ink-500: #7A7A8C;
+  --color-ink-400: #A0A0AE;
+  --color-ink-300: #C8C7CF;
+  --color-ink-200: #E6E5DF;
+  --color-ink-100: #F2F1EC;
+  --color-ink-50: #FAFAF7;
+
+  /* Semantic */
+  --color-success: #138A4F;
+  --color-success-bg: #E5F6EC;
+  --color-warning: #B8740A;
+  --color-warning-bg: #FFF3DC;
+  --color-danger: #C71B00;
+  --color-danger-bg: #FFEEE9;
+  --color-info: #0024C7;
+  --color-info-bg: #EEF1FF;
+
+  /* Radii */
+  --radius-1: 6px;
+  --radius-2: 12px;
+  --radius-3: 20px;
+  --radius-pill: 999px;
+}
+
+/* ── Plain CSS variables (used by inline styles & gradients) ─ */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --radius: 0.5rem;
+  /* Brand gradients (cannot live inside @theme without breaking tailwind utilities) */
+  --gradient-acial: linear-gradient(135deg, #0432FF 0%, #FF2600 100%);
+  --gradient-acial-soft: linear-gradient(135deg, rgba(4, 50, 255, 0.10) 0%, rgba(255, 38, 0, 0.10) 100%);
+  --gradient-acial-halo: radial-gradient(60% 60% at 30% 40%, rgba(4, 50, 255, 0.18) 0%, transparent 60%),
+                         radial-gradient(50% 50% at 80% 70%, rgba(255, 38, 0, 0.14) 0%, transparent 60%);
+
+  /* Elevation */
+  --shadow-1: 0 1px 2px rgba(15, 15, 30, 0.04), 0 0 0 1px rgba(15, 15, 30, 0.03);
+  --shadow-2: 0 4px 16px rgba(15, 15, 30, 0.06), 0 1px 2px rgba(15, 15, 30, 0.04);
+  --shadow-3: 0 12px 40px rgba(15, 15, 30, 0.08), 0 2px 6px rgba(15, 15, 30, 0.04);
+  --shadow-focus: 0 0 0 3px rgba(4, 50, 255, 0.25);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+/* ── Base ──────────────────────────────────────────────── */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
 }
 
-@layer base {
-  * {
-    border-color: var(--color-border);
-  }
-  body {
-    background-color: var(--color-background);
-    color: var(--color-foreground);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN",
-      "Hiragino Sans", "Meiryo", sans-serif;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-  }
-  html,
-  body,
-  #root {
-    height: 100%;
-  }
+body {
+  background: var(--color-ink-100);
+  color: var(--color-ink-900);
+  font-family: var(--font-jp);
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* ── Utility helpers ───────────────────────────────────── */
+.gradient-text {
+  background: var(--gradient-acial);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.gradient-bg {
+  background: var(--gradient-acial);
+  color: #fff;
+}
+
+.gradient-halo {
+  background: var(--gradient-acial-halo);
+}
+
+.tabular-nums {
+  font-feature-settings: "tnum";
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Animations ────────────────────────────────────────── */
+@keyframes jt-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes jt-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-jt-pulse {
+  animation: jt-pulse 1.4s ease-in-out infinite;
+}
+
+/* ── Scrollbar (Webkit) — keep thin and unobtrusive ───── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-ink-200);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }
