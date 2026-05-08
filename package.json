@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
   "description": "雀魂AIアシスタント - 雀魂の対局画面をキャプチャしMortalによる推奨アクションを表示するデスクトップアプリ",
   "scripts": {
     "dev": "vite",

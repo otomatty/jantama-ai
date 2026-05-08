@@ -147,18 +147,13 @@ jobs:
       - run: cargo check --all-targets
 
   build-tauri:
-    name: Build (Tauri ${{ matrix.platform.name }})
+    name: Build (Tauri Windows bundle)
     # PR では実行しない (cargo check で代替)。main push か手動のみ。
+    # tauri.conf.json の bundle.targets が ["msi","nsis"] (Windows 専用) のため
+    # 現状は Windows だけビルドする。macOS/Linux 配布が必要になったら matrix 化する。
     if: github.event_name != 'pull_request'
     needs: [build-web, build-rust-check]
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { name: linux, os: ubuntu-latest }
-          - { name: macos, os: macos-latest }
-          - { name: windows, os: windows-latest }
-    runs-on: ${{ matrix.platform.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -169,18 +164,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Install Tauri system deps (Linux)
-        if: matrix.platform.name == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libgtk-3-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev
       - run: npm ci
       - run: npm run tauri:build
 
