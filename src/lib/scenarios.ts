@@ -4,10 +4,7 @@
  * `runStubInference` のフォールバックなどで利用する。
  */
 
-import type {
-  GameBoardSummary,
-  InferenceResult,
-} from "@/types";
+import type { GameBoardSummary, InferenceResult } from "@/types";
 
 export type ScenarioKey = "dahai" | "riichi" | "fuuro" | "agari";
 
@@ -17,51 +14,9 @@ interface ScenarioFixture {
 }
 
 // Hand fixtures — same physical hands the design canvas uses.
-const HAND_TENPAI = [
-  "1m",
-  "2m",
-  "3m",
-  "4m",
-  "5m",
-  "6m",
-  "7p",
-  "8p",
-  "9p",
-  "1z",
-  "2z",
-  "3z",
-  "5m",
-];
-const HAND_MENZEN = [
-  "2m",
-  "3m",
-  "4m",
-  "6m",
-  "7m",
-  "8m",
-  "3p",
-  "4p",
-  "5p",
-  "7s",
-  "8s",
-  "9s",
-  "7z",
-];
-const HAND_AGARI = [
-  "1m",
-  "2m",
-  "3m",
-  "4m",
-  "5m",
-  "6m",
-  "7p",
-  "8p",
-  "9p",
-  "1z",
-  "1z",
-  "1z",
-  "5p",
-];
+const HAND_TENPAI = ["1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1z", "2z", "3z", "5m"];
+const HAND_MENZEN = ["2m", "3m", "4m", "6m", "7m", "8m", "3p", "4p", "5p", "7s", "8s", "9s", "7z"];
+const HAND_AGARI = ["1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1z", "1z", "1z", "5p"];
 
 const COMMON_BOARD: GameBoardSummary = {
   hand: HAND_TENPAI,

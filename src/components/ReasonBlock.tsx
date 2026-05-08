@@ -17,9 +17,7 @@ export function ReasonBlock({ reason }: ReasonBlockProps) {
           Reasoning
         </span>
       </div>
-      <p className="font-jp text-[14px] leading-[1.6] text-ink-700">
-        {reason}
-      </p>
+      <p className="font-jp text-[14px] leading-[1.6] text-ink-700">{reason}</p>
     </div>
   );
 }

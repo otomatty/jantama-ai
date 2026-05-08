@@ -39,12 +39,8 @@ export function ErrorBody({ error, onRetry, onOpenSettings }: ErrorBodyProps) {
           <line x1={12} y1={17} x2={12.01} y2={17} />
         </svg>
       </div>
-      <div className="font-jp text-[20px] font-bold leading-tight text-ink-900">
-        {title}
-      </div>
-      <p className="max-w-[300px] font-jp text-[14px] leading-[1.6] text-ink-600">
-        {message}
-      </p>
+      <div className="font-jp text-[20px] font-bold leading-tight text-ink-900">{title}</div>
+      <p className="max-w-[300px] font-jp text-[14px] leading-[1.6] text-ink-600">{message}</p>
       <div className="mt-1.5 flex gap-2">
         {onRetry && (
           <button

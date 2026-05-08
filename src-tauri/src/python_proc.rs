@@ -2,6 +2,10 @@
 //
 // PRD §8.1 全体構成図: Tauri (Rust) ↔ Python の間は stdin/stdout で
 // JSON-lines 通信を行う。recognition / mortal の 2 プロセスを管理。
+//
+// Phase D で配線するスケルトン。現状は呼び出し側が未実装のため module 全体に
+// dead_code 許可を付けている。
+#![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -47,7 +51,9 @@ impl PythonProcess {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            // stderr は read しないため pipe するとバッファ満杯でデッドロックし得る。
+            // Phase D で構造化ログとして取り込むまでは親プロセスへ継承する。
+            .stderr(Stdio::inherit())
             .spawn()?;
 
         let stdin = child

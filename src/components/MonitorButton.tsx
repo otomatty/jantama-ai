@@ -18,10 +18,7 @@ export function MonitorButton({ on, disabled, onClick }: MonitorButtonProps) {
       )}
       style={!on ? { background: "var(--gradient-acial)" } : undefined}
     >
-      <span
-        className="h-2 w-2 rounded-full"
-        style={{ background: on ? "#FF2600" : "#fff" }}
-      />
+      <span className="h-2 w-2 rounded-full" style={{ background: on ? "#FF2600" : "#fff" }} />
       {on ? "監視中 — 停止する" : "監視を開始する"}
     </button>
   );

@@ -48,9 +48,7 @@ export function HeroLayout({ inference }: HeroLayoutProps) {
             {inference.primary_label ?? actionLabel(recommended)}
           </div>
           <div className="flex items-baseline gap-1.5">
-            <span className="font-sans text-[9px] font-bold tracking-[0.1em] text-ink-500">
-              EV
-            </span>
+            <span className="font-sans text-[9px] font-bold tracking-[0.1em] text-ink-500">EV</span>
             <span className="gradient-text font-sans text-[26px] font-extrabold tracking-[-0.02em] tabular-nums">
               {evScore}
             </span>
@@ -59,9 +57,7 @@ export function HeroLayout({ inference }: HeroLayoutProps) {
             <ConfBar value={probability} />
             <div className="mt-[3px] flex items-center justify-between font-sans text-[9px] tracking-[0.04em] text-ink-500">
               <span>確信度</span>
-              <span className="font-mono tabular-nums">
-                {Math.round(probability * 100)}%
-              </span>
+              <span className="font-mono tabular-nums">{Math.round(probability * 100)}%</span>
             </div>
           </div>
         </div>

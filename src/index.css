@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500&display=swap");
 @import "tailwindcss";
 
 /* =========================================================
@@ -8,8 +8,9 @@
 /* Local Noto Sans JP (variable, brand-supplied) */
 @font-face {
   font-family: "Noto Sans JP";
-  src: url("/fonts/NotoSansJP-VariableFont_wght.ttf") format("truetype-variations"),
-       url("/fonts/NotoSansJP-VariableFont_wght.ttf") format("truetype");
+  src:
+    url("/fonts/NotoSansJP-VariableFont_wght.ttf") format("truetype-variations"),
+    url("/fonts/NotoSansJP-VariableFont_wght.ttf") format("truetype");
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
@@ -22,45 +23,45 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* Brand */
-  --color-acial-blue: #0432FF;
-  --color-acial-red: #FF2600;
+  --color-acial-blue: #0432ff;
+  --color-acial-red: #ff2600;
 
   /* Brand color steps */
-  --color-blue-50: #EEF1FF;
-  --color-blue-100: #D7DEFF;
-  --color-blue-300: #6E7FFF;
-  --color-blue-500: #0432FF;
-  --color-blue-700: #0024C7;
+  --color-blue-50: #eef1ff;
+  --color-blue-100: #d7deff;
+  --color-blue-300: #6e7fff;
+  --color-blue-500: #0432ff;
+  --color-blue-700: #0024c7;
   --color-blue-900: #001280;
 
-  --color-red-50: #FFEEE9;
-  --color-red-100: #FFD3C7;
-  --color-red-300: #FF7A5C;
-  --color-red-500: #FF2600;
-  --color-red-700: #C71B00;
-  --color-red-900: #800F00;
+  --color-red-50: #ffeee9;
+  --color-red-100: #ffd3c7;
+  --color-red-300: #ff7a5c;
+  --color-red-500: #ff2600;
+  --color-red-700: #c71b00;
+  --color-red-900: #800f00;
 
   /* Neutrals (warm, slightly off-white) */
-  --color-ink-900: #0F0F1E;
-  --color-ink-800: #1F1F2E;
-  --color-ink-700: #34344A;
+  --color-ink-900: #0f0f1e;
+  --color-ink-800: #1f1f2e;
+  --color-ink-700: #34344a;
   --color-ink-600: #545468;
-  --color-ink-500: #7A7A8C;
-  --color-ink-400: #A0A0AE;
-  --color-ink-300: #C8C7CF;
-  --color-ink-200: #E6E5DF;
-  --color-ink-100: #F2F1EC;
-  --color-ink-50: #FAFAF7;
+  --color-ink-500: #7a7a8c;
+  --color-ink-400: #a0a0ae;
+  --color-ink-300: #c8c7cf;
+  --color-ink-200: #e6e5df;
+  --color-ink-100: #f2f1ec;
+  --color-ink-50: #fafaf7;
 
   /* Semantic */
-  --color-success: #138A4F;
-  --color-success-bg: #E5F6EC;
-  --color-warning: #B8740A;
-  --color-warning-bg: #FFF3DC;
-  --color-danger: #C71B00;
-  --color-danger-bg: #FFEEE9;
-  --color-info: #0024C7;
-  --color-info-bg: #EEF1FF;
+  --color-success: #138a4f;
+  --color-success-bg: #e5f6ec;
+  --color-warning: #b8740a;
+  --color-warning-bg: #fff3dc;
+  --color-danger: #c71b00;
+  --color-danger-bg: #ffeee9;
+  --color-info: #0024c7;
+  --color-info-bg: #eef1ff;
 
   /* Radii */
   --radius-1: 6px;
@@ -72,10 +73,15 @@
 /* ── Plain CSS variables (used by inline styles & gradients) ─ */
 :root {
   /* Brand gradients (cannot live inside @theme without breaking tailwind utilities) */
-  --gradient-acial: linear-gradient(135deg, #0432FF 0%, #FF2600 100%);
-  --gradient-acial-soft: linear-gradient(135deg, rgba(4, 50, 255, 0.10) 0%, rgba(255, 38, 0, 0.10) 100%);
-  --gradient-acial-halo: radial-gradient(60% 60% at 30% 40%, rgba(4, 50, 255, 0.18) 0%, transparent 60%),
-                         radial-gradient(50% 50% at 80% 70%, rgba(255, 38, 0, 0.14) 0%, transparent 60%);
+  --gradient-acial: linear-gradient(135deg, #0432ff 0%, #ff2600 100%);
+  --gradient-acial-soft: linear-gradient(
+    135deg,
+    rgba(4, 50, 255, 0.1) 0%,
+    rgba(255, 38, 0, 0.1) 100%
+  );
+  --gradient-acial-halo:
+    radial-gradient(60% 60% at 30% 40%, rgba(4, 50, 255, 0.18) 0%, transparent 60%),
+    radial-gradient(50% 50% at 80% 70%, rgba(255, 38, 0, 0.14) 0%, transparent 60%);
 
   /* Elevation */
   --shadow-1: 0 1px 2px rgba(15, 15, 30, 0.04), 0 0 0 1px rgba(15, 15, 30, 0.03);
@@ -89,7 +95,9 @@
 }
 
 /* ── Base ──────────────────────────────────────────────── */
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
   padding: 0;
@@ -135,13 +143,22 @@ body {
 
 /* ── Animations ────────────────────────────────────────── */
 @keyframes jt-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
 @keyframes jt-spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .animate-jt-pulse {

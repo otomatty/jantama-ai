@@ -8,11 +8,7 @@ import { IdleBody } from "@/components/IdleBody";
 import { MonitorButton } from "@/components/MonitorButton";
 import { ReasonBlock } from "@/components/ReasonBlock";
 import { StatusBar } from "@/components/StatusBar";
-import {
-  runStubInference,
-  startMonitoring,
-  stopMonitoring,
-} from "@/lib/tauriCommands";
+import { runStubInference, startMonitoring, stopMonitoring } from "@/lib/tauriCommands";
 import type { AppState } from "@/state/appState";
 import type { GameBoardSummary, InferenceResult } from "@/types";
 
@@ -20,10 +16,7 @@ interface MainScreenProps {
   state: AppState;
   onOpenSettings: () => void;
   onMonitoringChange: (watching: boolean) => void;
-  onInferenceUpdate: (
-    inference: InferenceResult,
-    board: GameBoardSummary | null,
-  ) => void;
+  onInferenceUpdate: (inference: InferenceResult, board: GameBoardSummary | null) => void;
 }
 
 export function MainScreen({
@@ -69,23 +62,14 @@ export function MainScreen({
     <div
       className="mx-auto flex h-full w-full max-w-[480px] flex-col overflow-hidden border border-ink-200 bg-ink-50 font-jp"
       style={{
-        boxShadow:
-          "0 24px 60px rgba(15,15,30,0.14), 0 4px 12px rgba(15,15,30,0.06)",
+        boxShadow: "0 24px 60px rgba(15,15,30,0.14), 0 4px 12px rgba(15,15,30,0.06)",
       }}
     >
-      <StatusBar
-        monitoring={state.monitoring.watching}
-        onOpenSettings={onOpenSettings}
-      />
-      <ContextBar
-        board={state.monitoring.watching && state.inference ? state.board : null}
-      />
+      <StatusBar monitoring={state.monitoring.watching} onOpenSettings={onOpenSettings} />
+      <ContextBar board={state.monitoring.watching && state.inference ? state.board : null} />
 
       <main className="flex flex-1 flex-col overflow-y-auto">
-        <MainBody
-          state={state}
-          onOpenSettings={onOpenSettings}
-        />
+        <MainBody state={state} onOpenSettings={onOpenSettings} />
       </main>
 
       {state.monitoring.watching && state.inference && state.board && (
@@ -103,13 +87,7 @@ export function MainScreen({
   );
 }
 
-function MainBody({
-  state,
-  onOpenSettings,
-}: {
-  state: AppState;
-  onOpenSettings: () => void;
-}) {
+function MainBody({ state, onOpenSettings }: { state: AppState; onOpenSettings: () => void }) {
   if (state.phase === "uninitialized") {
     return (
       <ErrorBody
@@ -134,14 +112,9 @@ function MainBody({
   return (
     <div className="flex flex-col gap-3 p-3.5">
       <HeroLayout inference={state.inference} />
-      {state.settings.show_llm_reason && (
-        <ReasonBlock reason={state.inference.reason} />
-      )}
+      {state.settings.show_llm_reason && <ReasonBlock reason={state.inference.reason} />}
       {state.settings.show_danger_safe && (
-        <DangerSafeBlock
-          danger={state.inference.danger}
-          safe={state.inference.safe}
-        />
+        <DangerSafeBlock danger={state.inference.danger} safe={state.inference.safe} />
       )}
     </div>
   );

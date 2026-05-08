@@ -6,12 +6,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import type {
-  AppSettings,
-  CaptureWindow,
-  GameBoardSummary,
-  InferenceResult,
-} from "@/types";
+import type { AppSettings, CaptureWindow, GameBoardSummary, InferenceResult } from "@/types";
 import { nextStubScenario } from "@/lib/scenarios";
 
 function isTauri(): boolean {

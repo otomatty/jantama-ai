@@ -8,10 +8,7 @@ interface CandidateListProps {
   startRank?: number;
 }
 
-export function CandidateList({
-  candidates,
-  startRank = 2,
-}: CandidateListProps) {
+export function CandidateList({ candidates, startRank = 2 }: CandidateListProps) {
   if (candidates.length === 0) return null;
   return (
     <div>
@@ -31,15 +28,8 @@ export function CandidateList({
   );
 }
 
-function CandidateRow({
-  candidate,
-  rank,
-}: {
-  candidate: RecommendationCandidate;
-  rank: number;
-}) {
-  const display =
-    candidate.tile ?? candidate.action_label ?? ACTION_LABEL[candidate.action_type];
+function CandidateRow({ candidate, rank }: { candidate: RecommendationCandidate; rank: number }) {
+  const display = candidate.tile ?? candidate.action_label ?? ACTION_LABEL[candidate.action_type];
   const tileCode = candidate.tile && isTileCode(candidate.tile) ? candidate.tile : null;
   const ev = candidate.expected_value;
   return (
@@ -51,9 +41,7 @@ function CandidateRow({
         {tileCode ? (
           <Tile code={tileCode} size="sm" />
         ) : (
-          <span className="font-jp text-[13px] font-bold text-ink-700">
-            {display}
-          </span>
+          <span className="font-jp text-[13px] font-bold text-ink-700">{display}</span>
         )}
       </div>
       <div className="flex-1">

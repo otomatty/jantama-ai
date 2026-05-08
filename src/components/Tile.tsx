@@ -116,13 +116,7 @@ function PinDots({ n, red }: { n: number; red?: boolean }) {
   return (
     <>
       {pts.map(([x, y], i) => (
-        <circle
-          key={i}
-          cx={x * 60}
-          cy={y * 80}
-          r={6.5}
-          fill={red ? "#FF2600" : "#0F0F1E"}
-        />
+        <circle key={i} cx={x * 60} cy={y * 80} r={6.5} fill={red ? "#FF2600" : "#0F0F1E"} />
       ))}
     </>
   );
@@ -323,30 +317,13 @@ export function Tile({
             : "drop-shadow(0 1px 1px rgba(15,15,30,0.10))",
       }}
     >
-      <svg
-        viewBox="0 0 60 80"
-        width={w}
-        height={h}
-        style={{ display: "block" }}
-      >
+      <svg viewBox="0 0 60 80" width={w} height={h} style={{ display: "block" }}>
         <defs>
-          <linearGradient
-            id="tile-grad-stroke"
-            x1="0%"
-            y1="0%"
-            x2="100%"
-            y2="100%"
-          >
+          <linearGradient id="tile-grad-stroke" x1="0%" y1="0%" x2="100%" y2="100%">
             <stop offset="0%" stopColor="#0432FF" />
             <stop offset="100%" stopColor="#FF2600" />
           </linearGradient>
-          <linearGradient
-            id="tile-face-shade"
-            x1="0%"
-            y1="0%"
-            x2="0%"
-            y2="100%"
-          >
+          <linearGradient id="tile-face-shade" x1="0%" y1="0%" x2="0%" y2="100%">
             <stop offset="0%" stopColor="#FFFFFF" />
             <stop offset="100%" stopColor="#F0EFE9" />
           </linearGradient>

@@ -32,12 +32,9 @@ function VerbCard({ label, size = "xl" }: { label: string; size: TileSize }) {
       style={{
         width: dims,
         height: dims * 1.3,
-        background: isGradient
-          ? "linear-gradient(135deg, #0432FF 0%, #FF2600 100%)"
-          : "#0F0F1E",
+        background: isGradient ? "linear-gradient(135deg, #0432FF 0%, #FF2600 100%)" : "#0F0F1E",
         fontSize: dims * 0.32,
-        boxShadow:
-          "0 12px 40px rgba(15,15,30,0.18), 0 2px 6px rgba(15,15,30,0.08)",
+        boxShadow: "0 12px 40px rgba(15,15,30,0.18), 0 2px 6px rgba(15,15,30,0.08)",
       }}
     >
       {label}
