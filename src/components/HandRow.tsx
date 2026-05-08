@@ -30,13 +30,17 @@ export function HandRow({ board, inference }: HandRowProps) {
             key={`${t}-${i}`}
             code={t}
             size="sm"
-            highlight={recommendedTile === t && hand.indexOf(recommendedTile) === i}
+            highlight={recommendedTile === t}
           />
         ))}
         {hand.length === 14 && (
           <>
             <div className="w-1" />
-            <Tile code={hand[13]} size="sm" />
+            <Tile
+              code={hand[13]}
+              size="sm"
+              highlight={recommendedTile === hand[13]}
+            />
           </>
         )}
       </div>

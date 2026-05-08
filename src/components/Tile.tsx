@@ -302,7 +302,7 @@ export function Tile({
   }
 
   const suit = code ? code[1] : null;
-  const num = code ? parseInt(code[0], 10) : null;
+  const num = code && /^[1-9]/.test(code) ? parseInt(code[0], 10) : null;
 
   const tileStroke = highlight ? "url(#tile-grad-stroke)" : "#0F0F1E";
   const strokeW = highlight ? 2.5 : 1.2;
@@ -385,5 +385,5 @@ export function Tile({
 }
 
 export function isTileCode(s: string): boolean {
-  return /^[1-9][mpsz]$/.test(s);
+  return /^(?:[1-9][mps]|[1-7]z)$/.test(s);
 }

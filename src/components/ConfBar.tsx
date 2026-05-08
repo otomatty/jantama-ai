@@ -12,7 +12,8 @@ export function ConfBar({
   height = 4,
   className,
 }: ConfBarProps) {
-  const pct = Math.max(0, Math.min(100, value * 100));
+  const safeValue = Number.isFinite(value) ? value : 0;
+  const pct = Math.max(0, Math.min(100, safeValue * 100));
   return (
     <div
       className={"w-full overflow-hidden rounded-full bg-ink-100 " + (className ?? "")}

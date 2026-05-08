@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { MainScreen } from "@/screens/MainScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 import { useAppState } from "@/state/appState";
 import { loadSettings } from "@/lib/tauriCommands";
+import type { GameBoardSummary, InferenceResult } from "@/types";
 
 type Screen = "main" | "settings";
 
@@ -34,6 +35,34 @@ function App() {
     })();
   }, [setSettings, setPhase]);
 
+  const handleOpenSettings = useCallback(() => setScreen("settings"), []);
+
+  const handleMonitoringChange = useCallback(
+    (watching: boolean) => {
+      // 監視開始直後は推論がまだ走っていないので last_recognized_at は null。
+      // 実際の時刻は onInferenceUpdate で推論結果が届いた時に更新する。
+      setMonitoring({
+        watching,
+        capture_target_window_title: state.settings.capture_target_window_title,
+        last_recognized_at: null,
+      });
+      if (!watching) {
+        setInference(null);
+        setBoard(null);
+      }
+    },
+    [setMonitoring, setInference, setBoard, state.settings.capture_target_window_title],
+  );
+
+  const handleInferenceUpdate = useCallback(
+    (inference: InferenceResult, board: GameBoardSummary) => {
+      setInference(inference);
+      setBoard(board);
+      setMonitoring({ last_recognized_at: inference.timestamp });
+    },
+    [setInference, setBoard, setMonitoring],
+  );
+
   if (screen === "settings") {
     return (
       <SettingsScreen
@@ -55,24 +84,9 @@ function App() {
   return (
     <MainScreen
       state={state}
-      onOpenSettings={() => setScreen("settings")}
-      onMonitoringChange={(watching) => {
-        setMonitoring({
-          watching,
-          capture_target_window_title:
-            state.settings.capture_target_window_title,
-          last_recognized_at: watching ? new Date().toISOString() : null,
-        });
-        if (!watching) {
-          setInference(null);
-          setBoard(null);
-        }
-      }}
-      onInferenceUpdate={(inference, board) => {
-        setInference(inference);
-        setBoard(board);
-        setMonitoring({ last_recognized_at: inference.timestamp });
-      }}
+      onOpenSettings={handleOpenSettings}
+      onMonitoringChange={handleMonitoringChange}
+      onInferenceUpdate={handleInferenceUpdate}
     />
   );
 }

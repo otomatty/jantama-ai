@@ -234,21 +234,21 @@ let cursor = 0;
 
 /**
  * Demo 用にシナリオをローテートして返す (ブラウザ実行時のスタブ推論)。
+ * 呼び出し側がレスポンスを変更してもフィクスチャ本体を汚染しないよう、
+ * structuredClone でディープコピーして返す。
  */
 export function nextStubScenario(): ScenarioFixture {
   const key = SCENARIO_ROTATION[cursor % SCENARIO_ROTATION.length];
   cursor += 1;
-  const base = SCENARIO_FIXTURES[key];
-  return {
-    inference: { ...base.inference, timestamp: new Date().toISOString() },
-    board: base.board,
-  };
+  return cloneScenario(SCENARIO_FIXTURES[key]);
 }
 
 export function getScenario(key: ScenarioKey): ScenarioFixture {
-  const base = SCENARIO_FIXTURES[key];
-  return {
-    inference: { ...base.inference, timestamp: new Date().toISOString() },
-    board: base.board,
-  };
+  return cloneScenario(SCENARIO_FIXTURES[key]);
+}
+
+function cloneScenario(base: ScenarioFixture): ScenarioFixture {
+  const cloned = structuredClone(base);
+  cloned.inference.timestamp = new Date().toISOString();
+  return cloned;
 }

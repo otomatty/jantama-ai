@@ -45,11 +45,13 @@ export function SettingsScreen({
   const handlePickWindow = () => {
     // 画面側で簡易的にローテートさせる (デザイン版はネイティブのドロップダウン代替)
     if (windows.length === 0) return;
-    const idx = Math.max(
-      0,
-      windows.findIndex((w) => w.id === settings.capture_target_window_id),
+    const currentIndex = windows.findIndex(
+      (w) => w.id === settings.capture_target_window_id,
     );
-    const next = windows[(idx + 1) % windows.length];
+    // 未選択 (-1) の場合は先頭に。選択済みなら次の要素にローテート。
+    const nextIndex =
+      currentIndex === -1 ? 0 : (currentIndex + 1) % windows.length;
+    const next = windows[nextIndex];
     setSettings((s) => ({
       ...s,
       capture_target_window_id: next.id,
@@ -100,6 +102,7 @@ export function SettingsScreen({
         <button
           type="button"
           onClick={onBack}
+          aria-label="戻る"
           className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border border-ink-200 bg-white text-ink-700 transition-colors hover:bg-ink-50"
         >
           <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} />
@@ -150,6 +153,7 @@ export function SettingsScreen({
         <SettingGroup label="LLM 推奨理由">
           <ToggleField
             on={settings.show_llm_reason}
+            ariaLabel="LLM 推奨理由"
             onChange={(v) => setSettings((s) => ({ ...s, show_llm_reason: v }))}
           />
           <Hint>S-01 — Claude Haiku で打牌理由を生成</Hint>
@@ -158,6 +162,7 @@ export function SettingsScreen({
         <SettingGroup label="危険牌・安全牌の表示">
           <ToggleField
             on={settings.show_danger_safe}
+            ariaLabel="危険牌・安全牌の表示"
             onChange={(v) =>
               setSettings((s) => ({ ...s, show_danger_safe: v }))
             }
@@ -320,9 +325,11 @@ function SegmentedField({
 
 function ToggleField({
   on,
+  ariaLabel,
   onChange,
 }: {
   on: boolean;
+  ariaLabel: string;
   onChange: (next: boolean) => void;
 }) {
   return (
@@ -330,6 +337,7 @@ function ToggleField({
       type="button"
       role="switch"
       aria-checked={on}
+      aria-label={ariaLabel}
       onClick={() => onChange(!on)}
       className={cn(
         "inline-flex h-[22px] w-[38px] cursor-pointer items-center rounded-full border-0 p-0.5 transition-colors",
@@ -368,7 +376,9 @@ function RetentionRow({
           type="number"
           min={1}
           value={days}
-          onChange={(e) => onChange(Number(e.target.value) || 0)}
+          onChange={(e) =>
+            onChange(Math.max(1, Number(e.target.value) || 1))
+          }
           className="w-16 rounded border border-ink-200 bg-white px-2 py-0.5 text-right font-mono text-xs text-ink-700"
         />
         <span className="font-mono text-xs text-ink-500">日</span>
