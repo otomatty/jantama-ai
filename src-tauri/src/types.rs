@@ -29,17 +29,12 @@ pub struct WindowSize {
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InferenceBackend {
+    #[default]
     Rocm,
     Cpu,
-}
-
-impl Default for InferenceBackend {
-    fn default() -> Self {
-        InferenceBackend::Rocm
-    }
 }
 
 fn default_show_llm_reason() -> bool {

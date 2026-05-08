@@ -7,7 +7,7 @@ use crate::types::{
 };
 use crate::{capture, monitor, AppState};
 use chrono::Utc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tauri_plugin_store::StoreExt;
 
 const SETTINGS_STORE_FILE: &str = "settings.json";
