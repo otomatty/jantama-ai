@@ -343,7 +343,7 @@ function SegmentedField({
     <div className="inline-flex gap-0.5 rounded-md bg-ink-100 p-[3px]">
       {options.map((o, i) => (
         <button
-          key={i}
+          key={o}
           type="button"
           onClick={() => onChange(i)}
           className={cn(
