@@ -20,19 +20,29 @@ function App() {
 
   // 起動時に保存済み設定を読み込む
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const loaded = await loadSettings();
-      if (loaded) {
-        setSettings(loaded);
-        setPhase(
-          loaded.capture_target_window_id && loaded.mortal_model_path
-            ? "idle"
-            : "uninitialized",
-        );
-      } else {
-        setPhase("uninitialized");
+      try {
+        const loaded = await loadSettings();
+        if (cancelled) return;
+        if (loaded) {
+          setSettings(loaded);
+          setPhase(
+            loaded.capture_target_window_id && loaded.mortal_model_path
+              ? "idle"
+              : "uninitialized",
+          );
+        } else {
+          setPhase("uninitialized");
+        }
+      } catch {
+        // 設定ロード失敗時は未設定扱いにフォールバックし、画面遷移は決定論的に保つ
+        if (!cancelled) setPhase("uninitialized");
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [setSettings, setPhase]);
 
   const handleOpenSettings = useCallback(() => setScreen("settings"), []);
@@ -55,7 +65,7 @@ function App() {
   );
 
   const handleInferenceUpdate = useCallback(
-    (inference: InferenceResult, board: GameBoardSummary) => {
+    (inference: InferenceResult, board: GameBoardSummary | null) => {
       setInference(inference);
       setBoard(board);
       setMonitoring({ last_recognized_at: inference.timestamp });

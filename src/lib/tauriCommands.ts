@@ -72,16 +72,19 @@ export async function stopMonitoring(): Promise<void> {
 /**
  * デバッグ・E2E 確認用: ダミー推論を 1 回実行して結果を返す。
  * ブラウザ実行時は scenarios のローテーションを返す。
+ *
+ * Tauri モードではバックエンドが盤面サマリ (board) を返すようになるまで
+ * board は `null` を返す。以前は scenarios.board を併用していたが、
+ * 5 秒毎のポーリングで推論ペイロードと無関係な手牌・局・巡目が
+ * 切り替わってしまい、UI 上で推奨と盤面が乖離するため廃止した。
  */
 export async function runStubInference(): Promise<{
   inference: InferenceResult;
-  board: GameBoardSummary;
+  board: GameBoardSummary | null;
 }> {
   if (!isTauri()) {
     return nextStubScenario();
   }
   const inference = await invoke<InferenceResult>("run_stub_inference");
-  // バックエンドが盤面サマリも一緒に返すようになるまでは scenarios のものを併用
-  const fallback = nextStubScenario();
-  return { inference, board: fallback.board };
+  return { inference, board: null };
 }

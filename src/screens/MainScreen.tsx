@@ -22,7 +22,7 @@ interface MainScreenProps {
   onMonitoringChange: (watching: boolean) => void;
   onInferenceUpdate: (
     inference: InferenceResult,
-    board: GameBoardSummary,
+    board: GameBoardSummary | null,
   ) => void;
 }
 

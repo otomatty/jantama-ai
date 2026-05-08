@@ -23,12 +23,20 @@ export function SettingsScreen({
   const [windows, setWindows] = useState<CaptureWindow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [windowsError, setWindowsError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     listCaptureWindows()
       .then((list) => {
         if (!cancelled) setWindows(list);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWindows([]);
+          setWindowsError("ウィンドウ一覧の取得に失敗しました");
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -78,9 +86,21 @@ export function SettingsScreen({
 
   const handleSave = async () => {
     setSaving(true);
+    setSaveError(null);
+    // 既存ストア由来や stale な負数/0 を温存しないよう、保存直前に再正規化する。
+    const normalized: AppSettings = {
+      ...settings,
+      data_retention_days: {
+        inference_log: clampDay(settings.data_retention_days.inference_log),
+        tile_image: clampDay(settings.data_retention_days.tile_image),
+        error_log: clampDay(settings.data_retention_days.error_log),
+      },
+    };
     try {
-      await saveSettings(settings);
-      onSaved(settings);
+      await saveSettings(normalized);
+      onSaved(normalized);
+    } catch {
+      setSaveError("設定の保存に失敗しました");
     } finally {
       setSaving(false);
     }
@@ -125,7 +145,11 @@ export function SettingsScreen({
             }
             onClick={handlePickWindow}
           />
-          <Hint>起動中のウィンドウから選択</Hint>
+          {windowsError ? (
+            <Hint tone="danger">{windowsError}</Hint>
+          ) : (
+            <Hint>起動中のウィンドウから選択</Hint>
+          )}
         </SettingGroup>
 
         <SettingGroup label="Mortal モデル">
@@ -205,24 +229,38 @@ export function SettingsScreen({
       </div>
 
       {/* フッター */}
-      <div className="flex gap-2 border-t border-ink-200 bg-white p-3">
-        <button
-          type="button"
-          onClick={onBack}
-          disabled={saving}
-          className="flex-1 cursor-pointer rounded-lg border border-ink-200 bg-white px-3 py-3 font-jp text-sm font-semibold text-ink-900 transition-colors hover:bg-ink-50 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          キャンセル
-        </button>
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={saving}
-          className="flex-1 cursor-pointer rounded-lg border-0 px-3 py-3 font-jp text-sm font-bold text-white transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
-          style={{ background: "var(--gradient-acial)" }}
-        >
-          {saving ? "保存中..." : "保存"}
-        </button>
+      <div className="border-t border-ink-200 bg-white p-3">
+        {saveError && (
+          <div
+            role="alert"
+            className="mb-2 rounded-md px-3 py-2 font-jp text-[12px] font-semibold text-danger"
+            style={{
+              background: "var(--color-danger-bg)",
+              border: "1px solid rgba(199,27,0,0.18)",
+            }}
+          >
+            {saveError}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onBack}
+            disabled={saving}
+            className="flex-1 cursor-pointer rounded-lg border border-ink-200 bg-white px-3 py-3 font-jp text-sm font-semibold text-ink-900 transition-colors hover:bg-ink-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            キャンセル
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="flex-1 cursor-pointer rounded-lg border-0 px-3 py-3 font-jp text-sm font-bold text-white transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+            style={{ background: "var(--gradient-acial)" }}
+          >
+            {saving ? "保存中..." : "保存"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -355,8 +393,27 @@ function ToggleField({
   );
 }
 
-function Hint({ children }: { children: React.ReactNode }) {
-  return <div className="font-jp text-[11px] text-ink-500">{children}</div>;
+function Hint({
+  children,
+  tone = "muted",
+}: {
+  children: React.ReactNode;
+  tone?: "muted" | "danger";
+}) {
+  return (
+    <div
+      className={cn(
+        "font-jp text-[11px]",
+        tone === "danger" ? "text-danger" : "text-ink-500",
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function clampDay(value: number): number {
+  return Math.max(1, Number.isFinite(value) ? value : 1);
 }
 
 function RetentionRow({
