@@ -51,7 +51,9 @@ impl PythonProcess {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            // stderr は read しないため pipe するとバッファ満杯でデッドロックし得る。
+            // Phase D で構造化ログとして取り込むまでは親プロセスへ継承する。
+            .stderr(Stdio::inherit())
             .spawn()?;
 
         let stdin = child
