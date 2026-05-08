@@ -20,9 +20,7 @@ pub async fn list_capture_windows() -> Result<Vec<CaptureWindow>, String> {
 
 #[tauri::command]
 pub async fn load_settings(app: AppHandle) -> Result<Option<AppSettings>, String> {
-    let store = app
-        .store(SETTINGS_STORE_FILE)
-        .map_err(|e| e.to_string())?;
+    let store = app.store(SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
     let value = store.get(SETTINGS_KEY);
     if let Some(v) = value {
         let parsed: AppSettings =
@@ -35,9 +33,7 @@ pub async fn load_settings(app: AppHandle) -> Result<Option<AppSettings>, String
 
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
-    let store = app
-        .store(SETTINGS_STORE_FILE)
-        .map_err(|e| e.to_string())?;
+    let store = app.store(SETTINGS_STORE_FILE).map_err(|e| e.to_string())?;
     store.set(
         SETTINGS_KEY,
         serde_json::to_value(&settings).map_err(|e| e.to_string())?,
@@ -47,10 +43,7 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
 }
 
 #[tauri::command]
-pub async fn start_monitoring(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn start_monitoring(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // 既に動作中なら何もしない
     {
         let guard = state.monitor_handle.lock().unwrap();
@@ -60,9 +53,7 @@ pub async fn start_monitoring(
     }
 
     // 設定からキャプチャ対象を取得
-    let settings = load_settings(app.clone())
-        .await?
-        .unwrap_or_default();
+    let settings = load_settings(app.clone()).await?.unwrap_or_default();
     let target = settings
         .capture_target_window_id
         .clone()

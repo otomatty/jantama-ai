@@ -18,9 +18,7 @@ export function IdleBody() {
           <path d="M12 7v5l3 2" />
         </svg>
       </div>
-      <div className="font-jp text-[24px] font-bold leading-tight text-ink-900">
-        対局を待機中
-      </div>
+      <div className="font-jp text-[24px] font-bold leading-tight text-ink-900">対局を待機中</div>
       <div className="max-w-[280px] font-jp text-[14px] leading-[1.6] text-ink-600">
         雀魂のウィンドウを監視しています。自分の手番が来ると、ここに推奨アクションを表示します。
       </div>

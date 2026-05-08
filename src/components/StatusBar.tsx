@@ -22,9 +22,7 @@ export function StatusBar({ monitoring, onOpenSettings }: StatusBarProps) {
         <div className="flex items-baseline gap-px font-sans font-black tracking-[-0.02em] leading-none">
           <span className="gradient-text text-[17px]">雀</span>
           <span className="text-ink-900 text-[14px]">tama</span>
-          <span className="ml-1.5 text-[11px] font-medium tracking-[0.12em] text-ink-400">
-            AI
-          </span>
+          <span className="ml-1.5 text-[11px] font-medium tracking-[0.12em] text-ink-400">AI</span>
         </div>
         <span className="h-3 w-px bg-ink-200" />
         <MonitorPill on={monitoring} />

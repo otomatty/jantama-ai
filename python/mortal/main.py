@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from common import read_request, setup_stderr_logging, write_response
@@ -30,7 +30,7 @@ def stub_inference(_tenhou_json: dict[str, Any]) -> dict[str, Any]:
     return {
         "recommended": candidates[0],
         "candidates": candidates,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
 

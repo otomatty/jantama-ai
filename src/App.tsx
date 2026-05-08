@@ -8,14 +8,7 @@ import type { GameBoardSummary, InferenceResult } from "@/types";
 type Screen = "main" | "settings";
 
 function App() {
-  const {
-    state,
-    setPhase,
-    setSettings,
-    setMonitoring,
-    setInference,
-    setBoard,
-  } = useAppState();
+  const { state, setPhase, setSettings, setMonitoring, setInference, setBoard } = useAppState();
   const [screen, setScreen] = useState<Screen>("main");
 
   // 起動時に保存済み設定を読み込む
@@ -28,9 +21,7 @@ function App() {
         if (loaded) {
           setSettings(loaded);
           setPhase(
-            loaded.capture_target_window_id && loaded.mortal_model_path
-              ? "idle"
-              : "uninitialized",
+            loaded.capture_target_window_id && loaded.mortal_model_path ? "idle" : "uninitialized",
           );
         } else {
           setPhase("uninitialized");
@@ -81,9 +72,7 @@ function App() {
         onSaved={(next) => {
           setSettings(next);
           setPhase(
-            next.capture_target_window_id && next.mortal_model_path
-              ? "idle"
-              : "uninitialized",
+            next.capture_target_window_id && next.mortal_model_path ? "idle" : "uninitialized",
           );
           setScreen("main");
         }}

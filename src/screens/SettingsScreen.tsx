@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ChevronLeft } from "lucide-react";
-import {
-  type AppSettings,
-  type CaptureWindow,
-  type InferenceBackend,
-} from "@/types";
+import { type AppSettings, type CaptureWindow, type InferenceBackend } from "@/types";
 import { listCaptureWindows, saveSettings } from "@/lib/tauriCommands";
 import { cn } from "@/lib/utils";
 
@@ -14,11 +10,7 @@ interface SettingsScreenProps {
   onSaved: (next: AppSettings) => void;
 }
 
-export function SettingsScreen({
-  initialSettings,
-  onBack,
-  onSaved,
-}: SettingsScreenProps) {
+export function SettingsScreen({ initialSettings, onBack, onSaved }: SettingsScreenProps) {
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [windows, setWindows] = useState<CaptureWindow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46,19 +38,14 @@ export function SettingsScreen({
     };
   }, []);
 
-  const selectedWindow = windows.find(
-    (w) => w.id === settings.capture_target_window_id,
-  );
+  const selectedWindow = windows.find((w) => w.id === settings.capture_target_window_id);
 
   const handlePickWindow = () => {
     // 画面側で簡易的にローテートさせる (デザイン版はネイティブのドロップダウン代替)
     if (windows.length === 0) return;
-    const currentIndex = windows.findIndex(
-      (w) => w.id === settings.capture_target_window_id,
-    );
+    const currentIndex = windows.findIndex((w) => w.id === settings.capture_target_window_id);
     // 未選択 (-1) の場合は先頭に。選択済みなら次の要素にローテート。
-    const nextIndex =
-      currentIndex === -1 ? 0 : (currentIndex + 1) % windows.length;
+    const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % windows.length;
     const next = windows[nextIndex];
     setSettings((s) => ({
       ...s,
@@ -113,8 +100,7 @@ export function SettingsScreen({
     <div
       className="mx-auto flex h-full w-full max-w-[480px] flex-col overflow-hidden border border-ink-200 bg-white font-jp"
       style={{
-        boxShadow:
-          "0 24px 60px rgba(15,15,30,0.14), 0 4px 12px rgba(15,15,30,0.06)",
+        boxShadow: "0 24px 60px rgba(15,15,30,0.14), 0 4px 12px rgba(15,15,30,0.06)",
       }}
     >
       {/* ヘッダー */}
@@ -127,9 +113,7 @@ export function SettingsScreen({
         >
           <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} />
         </button>
-        <h2 className="m-0 font-jp text-[20px] font-bold leading-tight text-ink-900">
-          設定
-        </h2>
+        <h2 className="m-0 font-jp text-[20px] font-bold leading-tight text-ink-900">設定</h2>
       </div>
 
       {/* 中央 */}
@@ -137,11 +121,7 @@ export function SettingsScreen({
         <SettingGroup label="キャプチャ対象">
           <SelectField
             value={
-              loading
-                ? "ウィンドウを取得中..."
-                : selectedWindow
-                  ? selectedWindow.title
-                  : "未選択"
+              loading ? "ウィンドウを取得中..." : selectedWindow ? selectedWindow.title : "未選択"
             }
             onClick={handlePickWindow}
           />
@@ -187,9 +167,7 @@ export function SettingsScreen({
           <ToggleField
             on={settings.show_danger_safe}
             ariaLabel="危険牌・安全牌の表示"
-            onChange={(v) =>
-              setSettings((s) => ({ ...s, show_danger_safe: v }))
-            }
+            onChange={(v) => setSettings((s) => ({ ...s, show_danger_safe: v }))}
           />
           <Hint>S-02 — 他家リーチ時に常時表示</Hint>
         </SettingGroup>
@@ -266,13 +244,7 @@ export function SettingsScreen({
   );
 }
 
-function SettingGroup({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+function SettingGroup({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
       <div className="mb-1.5 font-sans text-[12px] font-bold uppercase tracking-[0.18em] text-ink-500">
@@ -283,13 +255,7 @@ function SettingGroup({
   );
 }
 
-function SelectField({
-  value,
-  onClick,
-}: {
-  value: string;
-  onClick?: () => void;
-}) {
+function SelectField({ value, onClick }: { value: string; onClick?: () => void }) {
   return (
     <button
       type="button"
@@ -302,22 +268,12 @@ function SelectField({
   );
 }
 
-function FileField({
-  value,
-  path,
-  onPick,
-}: {
-  value: string;
-  path: string;
-  onPick: () => void;
-}) {
+function FileField({ value, path, onPick }: { value: string; path: string; onPick: () => void }) {
   return (
     <div className="flex items-center justify-between gap-3 rounded-md border border-ink-200 bg-white px-3 py-2.5">
       <div className="min-w-0 flex-1">
         <div className="truncate font-mono text-xs text-ink-900">{value}</div>
-        {path && (
-          <div className="truncate font-mono text-[10px] text-ink-500">{path}</div>
-        )}
+        {path && <div className="truncate font-mono text-[10px] text-ink-500">{path}</div>}
       </div>
       <button
         type="button"
@@ -348,9 +304,7 @@ function SegmentedField({
           onClick={() => onChange(i)}
           className={cn(
             "cursor-pointer rounded border-0 px-3 py-1.5 font-jp text-[12px] font-semibold transition-colors",
-            i === active
-              ? "bg-white text-ink-900"
-              : "bg-transparent text-ink-500",
+            i === active ? "bg-white text-ink-900" : "bg-transparent text-ink-500",
           )}
           style={i === active ? { boxShadow: "var(--shadow-1)" } : undefined}
         >
@@ -401,12 +355,7 @@ function Hint({
   tone?: "muted" | "danger";
 }) {
   return (
-    <div
-      className={cn(
-        "font-jp text-[11px]",
-        tone === "danger" ? "text-danger" : "text-ink-500",
-      )}
-    >
+    <div className={cn("font-jp text-[11px]", tone === "danger" ? "text-danger" : "text-ink-500")}>
       {children}
     </div>
   );
@@ -433,9 +382,7 @@ function RetentionRow({
           type="number"
           min={1}
           value={days}
-          onChange={(e) =>
-            onChange(Math.max(1, Number(e.target.value) || 1))
-          }
+          onChange={(e) => onChange(Math.max(1, Number(e.target.value) || 1))}
           className="w-16 rounded border border-ink-200 bg-white px-2 py-0.5 text-right font-mono text-xs text-ink-700"
         />
         <span className="font-mono text-xs text-ink-500">日</span>

@@ -25,6 +25,7 @@ dist-ssr/
 .parcel-cache/
 .turbo/
 *.local
+*.tsbuildinfo
 
 # Testing
 coverage/

@@ -36,10 +36,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(
             tauri_plugin_sql::Builder::default()
-                .add_migrations(
-                    "sqlite:jantama-ai.db",
-                    db_migrations(),
-                )
+                .add_migrations("sqlite:jantama-ai.db", db_migrations())
                 .build(),
         )
         .setup(|app| {

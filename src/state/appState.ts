@@ -79,22 +79,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 export function useAppState() {
   const [state, dispatch] = useReducer(appReducer, INITIAL_APP_STATE);
 
-  const setPhase = useCallback(
-    (phase: AppPhase) => dispatch({ type: "SET_PHASE", phase }),
-    [],
-  );
+  const setPhase = useCallback((phase: AppPhase) => dispatch({ type: "SET_PHASE", phase }), []);
   const setSettings = useCallback(
     (settings: AppSettings) => dispatch({ type: "SET_SETTINGS", settings }),
     [],
   );
   const setMonitoring = useCallback(
-    (monitoring: Partial<MonitoringStatus>) =>
-      dispatch({ type: "SET_MONITORING", monitoring }),
+    (monitoring: Partial<MonitoringStatus>) => dispatch({ type: "SET_MONITORING", monitoring }),
     [],
   );
   const setInference = useCallback(
-    (inference: InferenceResult | null) =>
-      dispatch({ type: "SET_INFERENCE", inference }),
+    (inference: InferenceResult | null) => dispatch({ type: "SET_INFERENCE", inference }),
     [],
   );
   const setBoard = useCallback(
