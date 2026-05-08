@@ -85,33 +85,25 @@ pub async fn stop_monitoring(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn run_stub_inference() -> Result<InferenceResult, String> {
     // PRD §5.2 のサンプル数値をそのまま返すスタブ
+    let mk = |tile: &str, ev: f64, prob: f64| RecommendationCandidate {
+        tile: Some(tile.into()),
+        action_type: ActionType::Discard,
+        expected_value: ev,
+        action_label: Some("打牌".into()),
+        probability: Some(prob),
+        detail: None,
+    };
     Ok(InferenceResult {
-        recommended: RecommendationCandidate {
-            tile: Some("6m".into()),
-            action_type: ActionType::Discard,
-            expected_value: 0.32,
-            detail: None,
-        },
+        recommended: mk("6m", 0.32, 0.61),
         candidates: vec![
-            RecommendationCandidate {
-                tile: Some("6m".into()),
-                action_type: ActionType::Discard,
-                expected_value: 0.32,
-                detail: None,
-            },
-            RecommendationCandidate {
-                tile: Some("9p".into()),
-                action_type: ActionType::Discard,
-                expected_value: 0.18,
-                detail: None,
-            },
-            RecommendationCandidate {
-                tile: Some("1z".into()),
-                action_type: ActionType::Discard,
-                expected_value: -0.05,
-                detail: None,
-            },
+            mk("6m", 0.32, 0.61),
+            mk("9p", 0.18, 0.22),
+            mk("1z", -0.05, 0.11),
         ],
         timestamp: Utc::now().to_rfc3339(),
+        primary_label: Some("6m を切る".into()),
+        reason: None,
+        danger: None,
+        safe: None,
     })
 }
