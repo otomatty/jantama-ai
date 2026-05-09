@@ -286,6 +286,17 @@ fn run_cycle(
                 .unwrap_or("")
         )));
     }
+    // 取り違えガード: id が要求と一致しない応答は古いフレームの結果として捨てる。
+    let rec_id = rec_parsed
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| CycleError::RecognitionInvalid("missing id".into()))?;
+    if rec_id != frame_id {
+        return Err(CycleError::RecognitionInvalid(format!(
+            "id mismatch: expected {}, got {}",
+            frame_id, rec_id
+        )));
+    }
     let tenhou_json = rec_parsed
         .get("tenhou_json")
         .cloned()
@@ -310,6 +321,16 @@ fn run_cycle(
                 .get("type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
+        )));
+    }
+    let infer_id = infer_parsed
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| CycleError::MortalInvalid("missing id".into()))?;
+    if infer_id != frame_id {
+        return Err(CycleError::MortalInvalid(format!(
+            "id mismatch: expected {}, got {}",
+            frame_id, infer_id
         )));
     }
 

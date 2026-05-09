@@ -108,7 +108,7 @@ impl PythonProcess {
             stdin.write_all(b"\n")?;
         }
         stdin.flush()?;
-        debug!(target: "python_proc", "[{}] -> {}", self.label, line);
+        debug!(target: "python_proc", "[{}] -> {}", self.label, redact_for_log(line));
         Ok(())
     }
 
@@ -139,4 +139,25 @@ impl Drop for PythonProcess {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// `debug!` ログ出力用に 1 行 JSON をサニタイズする。
+///
+/// frame リクエストには `image_b64` (画面キャプチャの base64) が乗るため、
+/// そのままログに垂れ流すとスクリーンショットがファイル/ターミナルに溜まる。
+/// JSON として解釈できれば該当フィールドをサイズだけ残して伏せ、解釈
+/// できなければ元の文字列を返す。
+fn redact_for_log(line: &str) -> String {
+    let trimmed = line.trim();
+    let mut value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return trimmed.to_string(),
+    };
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(img) = obj.get_mut("image_b64") {
+            let len = img.as_str().map(str::len).unwrap_or(0);
+            *img = serde_json::Value::String(format!("<redacted {} bytes>", len));
+        }
+    }
+    value.to_string()
 }
