@@ -2,13 +2,9 @@
 //
 // PRD §8.1 全体構成図: Tauri (Rust) ↔ Python の間は stdin/stdout で
 // JSON-lines 通信を行う。recognition / mortal の 2 プロセスを管理。
-//
-// Phase D で配線するスケルトン。現状は呼び出し側が未実装のため module 全体に
-// dead_code 許可を付けている。
-#![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 use thiserror::Error;
@@ -36,25 +32,38 @@ pub struct PythonProcess {
 impl PythonProcess {
     /// Python プロセスを起動する。
     ///
-    /// `python_path`: 実行ファイル (PyInstaller でバンドル後の .exe を指定するか、
-    ///                開発時は uv 経由で `uv run python -m <module>` を使う想定)。
+    /// `program`: 実行ファイル (PyInstaller でバンドル後の .exe を指定するか、
+    ///            開発時は `uv` を渡し `args` で `["run", "jantama-recognition"]` 等)。
     /// `args`: コマンドライン引数。
+    /// `cwd`: 作業ディレクトリ。dev で `uv run` する場合は `python/` を指定する。
     pub fn spawn(
         label: impl Into<String>,
-        python_path: &PathBuf,
+        program: &Path,
         args: &[&str],
+        cwd: Option<&Path>,
     ) -> Result<Self, PythonProcError> {
         let label = label.into();
-        info!(target: "python_proc", "spawning {} ({})", label, python_path.display());
+        info!(
+            target: "python_proc",
+            "spawning {} ({} {})",
+            label,
+            program.display(),
+            args.join(" ")
+        );
 
-        let mut child = Command::new(python_path)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // stderr は read しないため pipe するとバッファ満杯でデッドロックし得る。
             // Phase D で構造化ログとして取り込むまでは親プロセスへ継承する。
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+        if let Some(dir) = cwd {
+            command.current_dir(dir);
+        }
+
+        let mut child = command.spawn()?;
 
         let stdin = child
             .stdin
@@ -98,6 +107,8 @@ impl PythonProcess {
     }
 
     /// プロセスを終了させる。Drop 時にも呼ばれるため二重 kill 安全。
+    /// MonitorHandle::stop からも明示的に呼び、recv_line でブロック中の
+    /// 監視スレッドを解放する。
     pub fn kill(&self) {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
