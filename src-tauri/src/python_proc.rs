@@ -26,6 +26,12 @@ pub struct PythonProcess {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
     stdout: Mutex<BufReader<ChildStdout>>,
+    /// 送信→受信を 1 つのトランザクションとして直列化するためのロック。
+    /// stdin / stdout のロックは個別なので、複数スレッドが
+    /// `send_line` → `recv_line` を呼ぶと別スレッドの応答を
+    /// 取り違える race が起き得る (#36 review)。`request_line` で
+    /// このロックを取って往復をくくることで防ぐ。
+    roundtrip: Mutex<()>,
     label: String,
 }
 
@@ -78,8 +84,20 @@ impl PythonProcess {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             stdout: Mutex::new(BufReader::new(stdout)),
+            roundtrip: Mutex::new(()),
             label,
         })
+    }
+
+    /// 1 行送って 1 行受け取る同期トランザクション。
+    ///
+    /// 複数スレッドからこのメソッドを呼んでも、`roundtrip` ロックで
+    /// 直列化されるので応答の取り違えは発生しない。スモークと監視ループの
+    /// ように同一プロセスへ並行アクセスするコードはこちらを使う。
+    pub fn request_line(&self, line: &str) -> Result<String, PythonProcError> {
+        let _guard = self.roundtrip.lock().unwrap();
+        self.send_line(line)?;
+        self.recv_line()
     }
 
     /// 1 行 JSON を送信する (末尾 \n を自動付与)。

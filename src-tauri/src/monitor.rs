@@ -145,10 +145,9 @@ pub fn start<R: Runtime>(
     let rec_for_thread = recognition.clone();
     let mortal_for_thread = mortal.clone();
     let app_for_thread = app.clone();
-    // ping/pong は recv_line がブロッキングなため、監視ループとは別スレッドで
-    // 並行に走らせる。こうしておけば本ループのキャプチャ→送信と互いをブロックしない。
-    // スモークが応答しない場合でも、stop 経由の kill() で recv_line が
-    // Err(Terminated) を返してスレッドは自然終了する。
+    // ping/pong は監視ループ本体と並行に走らせる。`PythonProcess::request_line`
+    // の roundtrip ロックで送受信が直列化されるため、本ループのフレーム要求と
+    // スモークの ping が応答を取り違えることはない (#36 review)。
     spawn_smoke_ping(recognition.clone(), "recognition");
     spawn_smoke_ping(mortal.clone(), "mortal");
 
@@ -261,10 +260,9 @@ fn run_cycle(
         "id": frame_id,
         "image_b64": image_b64,
     });
-    recognition
-        .send_line(&frame_req.to_string())
+    let rec_line = recognition
+        .request_line(&frame_req.to_string())
         .map_err(CycleError::RecognitionIo)?;
-    let rec_line = recognition.recv_line().map_err(CycleError::RecognitionIo)?;
     let rec_parsed: serde_json::Value = serde_json::from_str(rec_line.trim())
         .map_err(|e| CycleError::RecognitionInvalid(format!("json: {}", e)))?;
     if rec_parsed.get("type").and_then(|v| v.as_str()) != Some("result") {
@@ -288,10 +286,9 @@ fn run_cycle(
         "id": frame_id,
         "tenhou_json": tenhou_json,
     });
-    mortal
-        .send_line(&infer_req.to_string())
+    let infer_line = mortal
+        .request_line(&infer_req.to_string())
         .map_err(CycleError::MortalIo)?;
-    let infer_line = mortal.recv_line().map_err(CycleError::MortalIo)?;
     let infer_parsed: serde_json::Value = serde_json::from_str(infer_line.trim())
         .map_err(|e| CycleError::MortalInvalid(format!("json: {}", e)))?;
     if infer_parsed.get("type").and_then(|v| v.as_str()) != Some("result") {
@@ -428,21 +425,17 @@ fn self_wind_index(self_wind: &str) -> Option<usize> {
 }
 
 /// 1 サイクルの ping/pong を fire-and-forget で流す専用ワーカーを起動する。
-/// recv_line がブロッキングなので独立スレッドに切り出しておけば、
-/// recognition / mortal どちらかが応答しなくても他方や監視ループ本体の
-/// 500ms ポーリングは止まらない。スレッドへ渡した Arc が drop されることで
-/// MonitorHandle::stop の kill() が伝播し、recv_line が Err(Terminated) で
-/// 戻ってこのスレッドも自然終了する。
+/// 監視ループと並行に走るが、`PythonProcess::request_line` の roundtrip ロックで
+/// 直列化されるため、スモークの pong を本ループが取り違える心配はない。
+/// スモークが応答しない場合でも、stop 経由の kill() で recv_line が
+/// Err(Terminated) を返してスレッドは自然終了する。
 fn spawn_smoke_ping(proc: Arc<PythonProcess>, label: &'static str) {
     std::thread::spawn(move || {
-        if let Err(e) = proc.send_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID)) {
-            warn!(target: "monitor", "smoke ping send failed [{}]: {}", label, e);
-            return;
-        }
-        let resp = match proc.recv_line() {
+        let resp = match proc.request_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID))
+        {
             Ok(s) => s,
             Err(e) => {
-                warn!(target: "monitor", "smoke pong recv failed [{}]: {}", label, e);
+                warn!(target: "monitor", "smoke ping/pong [{}] failed: {}", label, e);
                 return;
             }
         };
