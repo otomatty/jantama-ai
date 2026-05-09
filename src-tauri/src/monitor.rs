@@ -372,12 +372,15 @@ fn encode_png(img: &xcap::image::RgbaImage) -> Result<Vec<u8>, String> {
 /// 揃わない場合は `None` を返し、フロント側で「盤面なし」表示にフォールバックさせる。
 fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
     let obj = tenhou.as_object()?;
+    // 配列要素が全て文字列でない場合は、部分的な手牌で先に進むより
+    // GameBoardSummary 全体を None にして「盤面なし」表示に倒した方が安全。
+    // recognition 側のスキーマ崩れ (例: 数値が混ざる) を黙って通過させない。
     let hand: Vec<String> = obj
         .get("hand")?
         .as_array()?
         .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+        .map(|v| v.as_str().map(String::from))
+        .collect::<Option<Vec<String>>>()?;
     let self_wind = obj.get("self_wind")?.as_str()?.to_string();
     let round_wind = obj.get("round_wind")?.as_str()?.to_string();
     let turn: u32 = obj.get("turn")?.as_u64()?.try_into().ok()?;
@@ -385,8 +388,8 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
         .get("dora_indicators")?
         .as_array()?
         .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+        .map(|v| v.as_str().map(String::from))
+        .collect::<Option<Vec<String>>>()?;
     // tenhou 形式の `scores` は座順 (東→南→西→北) に並んでいる前提で、
     // 自分のスコアを `self_wind` から引く。先頭固定だと起家以外で誤った値が
     // フロントに渡るため。インデックスを引けない場合は `None` にして
