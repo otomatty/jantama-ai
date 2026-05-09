@@ -89,7 +89,7 @@ pub async fn start_monitoring(app: AppHandle, state: State<'_, AppState>) -> Res
         python_cwd,
     };
 
-    let handle = monitor::start(config).map_err(|e| e.to_string())?;
+    let handle = monitor::start(app.clone(), config).map_err(|e| e.to_string())?;
     *state.monitor_handle.lock().unwrap() = Some(handle);
     Ok(())
 }
