@@ -13,7 +13,7 @@
 
 use crate::capture;
 use crate::python_proc::{PythonProcError, PythonProcess};
-use crate::types::{GameBoardSummary, InferenceResult, RecommendationCandidate};
+use crate::types::{ActionType, GameBoardSummary, InferenceResult, RecommendationCandidate};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use chrono::Utc;
@@ -322,7 +322,7 @@ fn run_cycle(
         .map(str::to_string)
         .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-    let primary_label = recommended.tile.as_ref().map(|t| format!("{} を切る", t));
+    let primary_label = format_primary_label(&recommended);
 
     let inference = InferenceResult {
         recommended,
@@ -335,6 +335,30 @@ fn run_cycle(
     };
 
     Ok((inference, board))
+}
+
+/// 推奨候補から UI のプライマリ表示文を組み立てる。
+///
+/// - mortal が `action_label` を返している場合はそれを優先して尊重する
+///   (フロント側の表現バリエーション「リーチ / ダマ / スルー」等を残せるため)。
+/// - 無い場合は `action_type` ごとの定型文にフォールバックし、Discard だけは
+///   `tile` と組み合わせて「N を切る」にする。`tile` が無い Discard は
+///   想定外なので `None` を返してフロント側で他の手掛かり (recommended.tile
+///   等) に任せる。
+fn format_primary_label(rec: &RecommendationCandidate) -> Option<String> {
+    if let Some(label) = rec.action_label.as_ref().filter(|s| !s.trim().is_empty()) {
+        return Some(label.clone());
+    }
+    match rec.action_type {
+        ActionType::Discard => rec.tile.as_ref().map(|t| format!("{} を切る", t)),
+        ActionType::Riichi => Some("リーチ".into()),
+        ActionType::Tsumo => Some("ツモ".into()),
+        ActionType::Ron => Some("ロン".into()),
+        ActionType::Pon => Some("ポン".into()),
+        ActionType::Chi => Some("チー".into()),
+        ActionType::Kan => Some("カン".into()),
+        ActionType::Pass => Some("スルー".into()),
+    }
 }
 
 /// `RgbaImage` を PNG にエンコードしてバイト列で返す。
@@ -359,18 +383,23 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
         .collect();
     let self_wind = obj.get("self_wind")?.as_str()?.to_string();
     let round_wind = obj.get("round_wind")?.as_str()?.to_string();
-    let turn = obj.get("turn")?.as_u64()? as u32;
+    let turn: u32 = obj.get("turn")?.as_u64()?.try_into().ok()?;
     let dora_indicators: Vec<String> = obj
         .get("dora_indicators")?
         .as_array()?
         .iter()
         .filter_map(|v| v.as_str().map(String::from))
         .collect();
-    let score = obj
-        .get("scores")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.as_i64());
+    // tenhou 形式の `scores` は座順 (東→南→西→北) に並んでいる前提で、
+    // 自分のスコアを `self_wind` から引く。先頭固定だと起家以外で誤った値が
+    // フロントに渡るため。インデックスを引けない場合は `None` にして
+    // 「持ち点不明」フォールバックさせる。
+    let score = self_wind_index(&self_wind).and_then(|idx| {
+        obj.get("scores")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.get(idx))
+            .and_then(|v| v.as_i64())
+    });
     let round_label = obj
         .get("round_label")
         .and_then(|v| v.as_str())
@@ -384,6 +413,18 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
         score,
         round_label,
     })
+}
+
+/// 自家の風 (`self_wind`) を `scores` 配列のインデックスへ写像する。
+/// tenhou 形式では座順 = 東 (0), 南 (1), 西 (2), 北 (3) で並ぶ。
+fn self_wind_index(self_wind: &str) -> Option<usize> {
+    match self_wind {
+        "東" => Some(0),
+        "南" => Some(1),
+        "西" => Some(2),
+        "北" => Some(3),
+        _ => None,
+    }
 }
 
 /// 1 サイクルの ping/pong を fire-and-forget で流す専用ワーカーを起動する。
