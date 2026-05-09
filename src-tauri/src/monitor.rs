@@ -145,14 +145,26 @@ pub fn start<R: Runtime>(
     let rec_for_thread = recognition.clone();
     let mortal_for_thread = mortal.clone();
     let app_for_thread = app.clone();
-    // ping/pong は監視ループ本体と並行に走らせる。`PythonProcess::request_line`
-    // の roundtrip ロックで送受信が直列化されるため、本ループのフレーム要求と
-    // スモークの ping が応答を取り違えることはない (#36 review)。
-    spawn_smoke_ping(recognition.clone(), "recognition");
-    spawn_smoke_ping(mortal.clone(), "mortal");
 
     let join = std::thread::spawn(move || {
         info!(target: "monitor", "monitor loop started");
+
+        // スモーク ping/pong は本ループの前に済ませる。
+        // 並行に走らせると `PythonProcess::request_line` の roundtrip ロックを
+        // スモーク側が握ったまま recv で詰まり、本ループのフレーム要求が
+        // 出せなくなる (#36 review by codex)。recognition と mortal は別プロセスなので
+        // 双方のスモークだけはスレッド分割して並列化し、起動時間を短縮する。
+        let rec_smoke = {
+            let p = rec_for_thread.clone();
+            std::thread::spawn(move || smoke_ping(p.as_ref(), "recognition"))
+        };
+        let mortal_smoke = {
+            let p = mortal_for_thread.clone();
+            std::thread::spawn(move || smoke_ping(p.as_ref(), "mortal"))
+        };
+        let _ = rec_smoke.join();
+        let _ = mortal_smoke.join();
+
         // SMOKE_PING_ID (=0) と衝突しないよう 1 から開始。
         let mut frame_id: i64 = SMOKE_PING_ID + 1;
         while !stop_for_thread.load(Ordering::SeqCst) {
@@ -427,31 +439,26 @@ fn self_wind_index(self_wind: &str) -> Option<usize> {
     }
 }
 
-/// 1 サイクルの ping/pong を fire-and-forget で流す専用ワーカーを起動する。
-/// 監視ループと並行に走るが、`PythonProcess::request_line` の roundtrip ロックで
-/// 直列化されるため、スモークの pong を本ループが取り違える心配はない。
-/// スモークが応答しない場合でも、stop 経由の kill() で recv_line が
-/// Err(Terminated) を返してスレッドは自然終了する。
-fn spawn_smoke_ping(proc: Arc<PythonProcess>, label: &'static str) {
-    std::thread::spawn(move || {
-        let resp = match proc.request_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID))
-        {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(target: "monitor", "smoke ping/pong [{}] failed: {}", label, e);
-                return;
-            }
-        };
-        let trimmed = resp.trim();
-        match validate_pong(trimmed) {
-            Ok(()) => info!(target: "monitor", "smoke ping/pong [{}]: ok ({})", label, trimmed),
-            Err(reason) => warn!(
-                target: "monitor",
-                "smoke ping/pong [{}]: {} (raw: {})",
-                label, reason, trimmed
-            ),
+/// 1 往復の ping/pong を同期実行する。本ループ突入前に呼ばれる前提なので、
+/// `request_line` の roundtrip ロックを握っても誰も待っていない。応答が無く
+/// 詰まった場合でも stop() の kill() が `recv_line` を解錠して戻ってくる。
+fn smoke_ping(proc: &PythonProcess, label: &'static str) {
+    let resp = match proc.request_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID)) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(target: "monitor", "smoke ping/pong [{}] failed: {}", label, e);
+            return;
         }
-    });
+    };
+    let trimmed = resp.trim();
+    match validate_pong(trimmed) {
+        Ok(()) => info!(target: "monitor", "smoke ping/pong [{}]: ok ({})", label, trimmed),
+        Err(reason) => warn!(
+            target: "monitor",
+            "smoke ping/pong [{}]: {} (raw: {})",
+            label, reason, trimmed
+        ),
+    }
 }
 
 /// レスポンスが期待通りの `{"type":"pong","id":SMOKE_PING_ID}` であることを
