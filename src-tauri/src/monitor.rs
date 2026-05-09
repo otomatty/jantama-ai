@@ -110,17 +110,18 @@ pub fn start(config: MonitorConfig) -> Result<MonitorHandle, MonitorError> {
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_for_thread = stop_flag.clone();
-    // ping/pong は recv_line がブロッキングなため監視スレッド内で行い、
-    // start_monitoring 自体は即座に MonitorHandle を返せるようにする。
-    // こうしておけばスモークテストが応答しない場合でも、フロントから
-    // stop_monitoring を呼ぶことで kill 経由で復帰できる。
-    let recognition_for_thread = recognition.clone();
-    let mortal_for_thread = mortal.clone();
+    // ping/pong は recv_line がブロッキングなため、監視ループとは別スレッドで
+    // 並行に走らせる。こうしておけば
+    //   - start_monitoring は即座に MonitorHandle を返せる
+    //   - recognition と mortal のスモークが互いをブロックしない
+    //   - 監視ループ本体の 500ms ポーリング (stop_flag 監視) も止まらない
+    // スモークが応答しない場合でも、stop 経由の kill() で recv_line が
+    // Err(Terminated) を返してスレッドは自然終了する。
+    spawn_smoke_ping(recognition.clone(), "recognition");
+    spawn_smoke_ping(mortal.clone(), "mortal");
 
     let join = std::thread::spawn(move || {
         info!(target: "monitor", "monitor loop started");
-        run_smoke_ping(&recognition_for_thread, "recognition");
-        run_smoke_ping(&mortal_for_thread, "mortal");
         while !stop_for_thread.load(Ordering::SeqCst) {
             // TODO(Phase B2/B3): capture → recognize → infer → emit event
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -136,38 +137,50 @@ pub fn start(config: MonitorConfig) -> Result<MonitorHandle, MonitorError> {
     })
 }
 
-/// 監視スレッド内で 1 サイクルの ping/pong を流す。
-/// 失敗時は warning ログのみ吐いて呼び出し元へは通知しない
-/// (ループ自体は継続させ、復旧は monitor::stop に任せる)。
-fn run_smoke_ping(proc: &PythonProcess, label: &str) {
-    if let Err(e) = proc.send_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID)) {
-        warn!(target: "monitor", "smoke ping send failed [{}]: {}", label, e);
-        return;
-    }
-    let resp = match proc.recv_line() {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(target: "monitor", "smoke pong recv failed [{}]: {}", label, e);
+/// 1 サイクルの ping/pong を fire-and-forget で流す専用ワーカーを起動する。
+/// recv_line がブロッキングなので独立スレッドに切り出しておけば、
+/// recognition / mortal どちらかが応答しなくても他方や監視ループ本体の
+/// 500ms ポーリングは止まらない。スレッドへ渡した Arc が drop されることで
+/// MonitorHandle::stop の kill() が伝播し、recv_line が Err(Terminated) で
+/// 戻ってこのスレッドも自然終了する。
+fn spawn_smoke_ping(proc: Arc<PythonProcess>, label: &'static str) {
+    std::thread::spawn(move || {
+        if let Err(e) = proc.send_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID)) {
+            warn!(target: "monitor", "smoke ping send failed [{}]: {}", label, e);
             return;
         }
-    };
-    let trimmed = resp.trim();
-    match validate_pong(trimmed) {
-        Ok(()) => info!(target: "monitor", "smoke ping/pong [{}]: ok ({})", label, trimmed),
-        Err(reason) => warn!(
-            target: "monitor",
-            "smoke ping/pong [{}]: {} (raw: {})",
-            label, reason, trimmed
-        ),
-    }
+        let resp = match proc.recv_line() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(target: "monitor", "smoke pong recv failed [{}]: {}", label, e);
+                return;
+            }
+        };
+        let trimmed = resp.trim();
+        match validate_pong(trimmed) {
+            Ok(()) => info!(target: "monitor", "smoke ping/pong [{}]: ok ({})", label, trimmed),
+            Err(reason) => warn!(
+                target: "monitor",
+                "smoke ping/pong [{}]: {} (raw: {})",
+                label, reason, trimmed
+            ),
+        }
+    });
 }
 
-/// レスポンスが期待通りの `{"type":"pong","id":SMOKE_PING_ID}` 形式かを検証する。
-/// プロセスが起動直後に無関係なログを stdout に流した場合や、`error` 応答を
-/// 返した場合に、誤って成功と判断しないようにする。
+/// レスポンスが期待通りの `{"type":"pong","id":SMOKE_PING_ID}` であることを
+/// 厳密に検証する。プロトコルは Rust ↔ Python 間の内部仕様なので、未知の
+/// 追加フィールドや余分なキーは「想定外の応答」として扱い、smoke を
+/// 成功にしない。これによりプロトコルドリフトを早期に検知できる。
 fn validate_pong(line: &str) -> Result<(), String> {
     let parsed: serde_json::Value =
         serde_json::from_str(line).map_err(|e| format!("invalid json: {}", e))?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| "response is not a JSON object".to_string())?;
+    if obj.len() != 2 || !obj.contains_key("type") || !obj.contains_key("id") {
+        return Err("response must contain exactly 'type' and 'id'".into());
+    }
     match parsed.get("type").and_then(|v| v.as_str()) {
         Some("pong") => {}
         Some(other) => return Err(format!("unexpected type: {}", other)),
