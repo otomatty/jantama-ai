@@ -225,8 +225,13 @@ class _FakePytesseract:
         return self._returns
 
 
-def _install_fake_pytesseract(monkeypatch: pytest.MonkeyPatch, fake: _FakePytesseract) -> None:
-    """`_get_pytesseract` がインポート試行する前に `_PYTESSERACT` を埋める。"""
+def _install_fake_pytesseract(fake: object) -> None:
+    """`_get_pytesseract` がインポート試行する前に `_PYTESSERACT` を埋める。
+
+    `fake` は `image_to_string` を持つ任意のオブジェクト (`_FakePytesseract` や
+    stateful `_Side` クラス等)。`error = None` のリセットも込みで、各テストが
+    helper 経由で統一的に扱えるようにする (CodeRabbit nit on PR #44)。
+    """
     ocr_recognizer._PYTESSERACT.module = fake
     ocr_recognizer._PYTESSERACT.tried = True
     ocr_recognizer._PYTESSERACT.error = None
@@ -234,7 +239,7 @@ def _install_fake_pytesseract(monkeypatch: pytest.MonkeyPatch, fake: _FakePytess
 
 def test_recognize_round_label_parses_japanese_output(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakePytesseract({"jpn": "東1局\n"})
-    _install_fake_pytesseract(monkeypatch, fake)
+    _install_fake_pytesseract(fake)
     bgr = np.full((40, 80, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:75] = 255  # OTSU の閾値計算が回るよう適度なバラつき
     label = ocr_recognizer.recognize_round_label(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
@@ -244,7 +249,7 @@ def test_recognize_round_label_parses_japanese_output(monkeypatch: pytest.Monkey
 def test_recognize_round_label_handles_missing_kyoku(monkeypatch: pytest.MonkeyPatch) -> None:
     """OCR が「局」を読み損ねても、「南3」だけで局名を組み立てる。"""
     fake = _FakePytesseract({"jpn": "南3"})
-    _install_fake_pytesseract(monkeypatch, fake)
+    _install_fake_pytesseract(fake)
     bgr = np.full((40, 80, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:75] = 255
     label = ocr_recognizer.recognize_round_label(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
@@ -253,14 +258,14 @@ def test_recognize_round_label_handles_missing_kyoku(monkeypatch: pytest.MonkeyP
 
 def test_recognize_round_label_returns_none_on_garbage(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakePytesseract({"jpn": "????"})
-    _install_fake_pytesseract(monkeypatch, fake)
+    _install_fake_pytesseract(fake)
     bgr = np.full((40, 80, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:75] = 255
     label = ocr_recognizer.recognize_round_label(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
     assert label is None
 
 
-def test_recognize_scores_returns_all_four(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recognize_scores_returns_all_four() -> None:
     # OCR は呼ばれる順に決めたい (4 セグで違う値) → side_effect 風に。
     values = iter(["25000", "30000", "20000", "25000"])
 
@@ -274,9 +279,7 @@ def test_recognize_scores_returns_all_four(monkeypatch: pytest.MonkeyPatch) -> N
             self.calls += 1
             return next(values)
 
-    fake = _Side()
-    ocr_recognizer._PYTESSERACT.module = fake
-    ocr_recognizer._PYTESSERACT.tried = True
+    _install_fake_pytesseract(_Side())
 
     bgr = np.full((40, 160, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:155] = 255
@@ -284,7 +287,7 @@ def test_recognize_scores_returns_all_four(monkeypatch: pytest.MonkeyPatch) -> N
     assert scores == [25000, 30000, 20000, 25000]
 
 
-def test_recognize_scores_partial_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recognize_scores_partial_failure_returns_none() -> None:
     """4 セグのうち 1 つでも読み取れなければ all-or-nothing で `None`。"""
     values = iter(["25000", "", "20000", "25000"])
 
@@ -294,15 +297,14 @@ def test_recognize_scores_partial_failure_returns_none(monkeypatch: pytest.Monke
         ) -> str:  # noqa: ARG002
             return next(values)
 
-    ocr_recognizer._PYTESSERACT.module = _Side()
-    ocr_recognizer._PYTESSERACT.tried = True
+    _install_fake_pytesseract(_Side())
     bgr = np.full((40, 160, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:155] = 255
     scores = ocr_recognizer.recognize_scores(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
     assert scores is None
 
 
-def test_recognize_scores_negative_value(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recognize_scores_negative_value() -> None:
     """飛び (マイナス点) も読み取れる。"""
     values = iter(["50000", "-5000", "30000", "25000"])
 
@@ -312,8 +314,7 @@ def test_recognize_scores_negative_value(monkeypatch: pytest.MonkeyPatch) -> Non
         ) -> str:  # noqa: ARG002
             return next(values)
 
-    ocr_recognizer._PYTESSERACT.module = _Side()
-    ocr_recognizer._PYTESSERACT.tried = True
+    _install_fake_pytesseract(_Side())
     bgr = np.full((40, 160, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:155] = 255
     scores = ocr_recognizer.recognize_scores(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
@@ -322,7 +323,7 @@ def test_recognize_scores_negative_value(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_recognize_turn_in_range(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakePytesseract({"eng": "7"})
-    _install_fake_pytesseract(monkeypatch, fake)
+    _install_fake_pytesseract(fake)
     bgr = np.full((40, 40, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:35] = 255
     assert ocr_recognizer.recognize_turn(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) == 7
@@ -330,7 +331,7 @@ def test_recognize_turn_in_range(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_recognize_turn_out_of_range_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakePytesseract({"eng": "99"})
-    _install_fake_pytesseract(monkeypatch, fake)
+    _install_fake_pytesseract(fake)
     bgr = np.full((40, 40, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:35] = 255
     assert ocr_recognizer.recognize_turn(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) is None
@@ -368,9 +369,7 @@ def test_ocr_short_circuits_after_tesseract_not_found(
     _TesseractNotFoundError.__name__ = "TesseractNotFoundError"
 
     fake = _NotFoundFake()
-    ocr_recognizer._PYTESSERACT.module = fake
-    ocr_recognizer._PYTESSERACT.tried = True
-    ocr_recognizer._PYTESSERACT.error = None
+    _install_fake_pytesseract(fake)
 
     bgr = np.full((40, 40, 3), 128, dtype=np.uint8)
     bgr[5:35, 5:35] = 255
@@ -467,7 +466,7 @@ def test_board_recognizer_fills_round_label_when_ocr_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _FakePytesseract({"jpn": "南2局", "eng": ""})
-    _install_fake_pytesseract(monkeypatch, fake)
+    _install_fake_pytesseract(fake)
     rec = BoardRecognizer(tmp_path)
     bgr = np.full((80, 200, 3), 128, dtype=np.uint8)
     bgr[5:75, 5:195] = 255
@@ -485,7 +484,7 @@ def test_board_recognizer_field_failures_are_isolated(
     # OCR は round_label だけ成功し、scores/turn は失敗 (空文字)
     values: dict[str, str] = {"jpn": "東4局", "eng": ""}
     fake = _FakePytesseract(values)
-    _install_fake_pytesseract(monkeypatch, fake)
+    _install_fake_pytesseract(fake)
 
     rec = BoardRecognizer(tmp_path)
     grays = [_make_pattern(TILE_CODES.index(c)) for c in TILE_CODES[:HAND_SLOTS]]
@@ -512,7 +511,6 @@ def test_board_recognizer_field_failures_are_isolated(
 
 def test_board_recognizer_drops_scores_when_self_wind_not_recognized(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Codex P1 on PR #44: scores OCR が通っても self_wind が未認識なら scores は採用しない。
@@ -531,8 +529,7 @@ def test_board_recognizer_drops_scores_when_self_wind_not_recognized(
         ) -> str:  # noqa: ARG002
             return next(values)
 
-    ocr_recognizer._PYTESSERACT.module = _Side()
-    ocr_recognizer._PYTESSERACT.tried = True
+    _install_fake_pytesseract(_Side())
 
     rec = BoardRecognizer(tmp_path)
     bgr = np.full((40, 160, 3), 128, dtype=np.uint8)
@@ -550,10 +547,7 @@ def test_board_recognizer_drops_scores_when_self_wind_not_recognized(
     assert len(warns) == 1
 
 
-def test_board_recognizer_accepts_scores_when_both_recognized(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_board_recognizer_accepts_scores_when_both_recognized(tmp_path: Path) -> None:
     """self_wind と scores の両方が認識できれば scores はそのまま採用される。"""
     _write_all_wind_templates(tmp_path / "winds")
 
@@ -565,8 +559,7 @@ def test_board_recognizer_accepts_scores_when_both_recognized(
         ) -> str:  # noqa: ARG002
             return next(values)
 
-    ocr_recognizer._PYTESSERACT.module = _Side()
-    ocr_recognizer._PYTESSERACT.tried = True
+    _install_fake_pytesseract(_Side())
 
     rec = BoardRecognizer(tmp_path)
     # 南風テンプレと完全一致する画像を self_wind ROI に流す → "南" が返る

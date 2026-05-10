@@ -56,7 +56,8 @@ def _get_pytesseract():  # type: ignore[no-untyped-def]
 
 
 # 雀魂局名で出現する文字のみを許可。OCR 誤検出 (例: 漢字「東」を「束」と誤読) を抑える。
-_ROUND_LABEL_WHITELIST = "東南西北123412345局"
+# 局番号は 1-4 のみ (東1局〜東4局 / 南1局〜南4局)、5 以上は存在しない (CodeRabbit nit on PR #44)。
+_ROUND_LABEL_WHITELIST = "東南西北1234局"
 _DIGIT_WHITELIST = "0123456789"
 _SCORE_WHITELIST = "0123456789-"
 
