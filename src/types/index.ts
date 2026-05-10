@@ -22,6 +22,52 @@ export type AppPhase =
 
 export type InferenceBackend = "rocm" | "cpu";
 
+/**
+ * ROI 矩形 (PRD §9 リスク表 / issue #10)。
+ *
+ * 雀魂のウィンドウサイズ・解像度に依存しないように、左上原点での
+ * 0.0〜1.0 比率で保存する。キャプチャサイズが変わってもそのまま使える。
+ */
+export interface RoiRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** ROI キャリブレーション領域 ID。UI とロジックで共有する。 */
+export type RoiRegionId =
+  | "hand"
+  | "doras"
+  | "river_self"
+  | "river_right"
+  | "river_across"
+  | "river_left"
+  | "round_info"
+  | "self_wind";
+
+/** ROI キャリブレーション結果 (issue #10)。未指定領域は `null`。 */
+export interface RoiCalibration {
+  hand: RoiRect | null;
+  doras: RoiRect | null;
+  rivers: {
+    self: RoiRect | null;
+    right: RoiRect | null;
+    across: RoiRect | null;
+    left: RoiRect | null;
+  };
+  round_info: RoiRect | null;
+  self_wind: RoiRect | null;
+}
+
+export const EMPTY_ROI_CALIBRATION: RoiCalibration = {
+  hand: null,
+  doras: null,
+  rivers: { self: null, right: null, across: null, left: null },
+  round_info: null,
+  self_wind: null,
+};
+
 export interface AppSettings {
   capture_target_window_id: string | null;
   capture_target_window_title: string | null;
@@ -37,6 +83,8 @@ export interface AppSettings {
     error_log: number;
   };
   hotkey_settings?: Record<string, string>;
+  /** ROI キャリブレーション結果 (issue #10)。未キャリブレーション時は全 `null`。 */
+  roi_calibration: RoiCalibration;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -53,6 +101,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     tile_image: 7,
     error_log: 90,
   },
+  roi_calibration: EMPTY_ROI_CALIBRATION,
 };
 
 // ============================================================

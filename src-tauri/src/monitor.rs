@@ -15,6 +15,7 @@ use crate::capture;
 use crate::python_proc::{PythonProcError, PythonProcess};
 use crate::types::{
     ActionType, GameBoardSummary, InferenceBackend, InferenceResult, RecommendationCandidate,
+    RiverRois, RoiCalibration, RoiRect,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -57,6 +58,9 @@ pub struct MonitorConfig {
     /// 空文字列なら mortal を `--stub` モードで起動する。
     pub mortal_model_path: String,
     pub inference_backend: InferenceBackend,
+    /// ROI キャリブレーション (issue #10)。recognition プロセスは
+    /// frame request の `roi_calibration` を見て領域を切り出す。
+    pub roi_calibration: RoiCalibration,
 }
 
 /// `Arc<PythonProcess>` を差し替え可能にしたスロット。
@@ -173,6 +177,7 @@ pub fn start<R: Runtime>(
         capture_target,
         mortal_model_path,
         inference_backend,
+        roi_calibration,
     } = config;
 
     // capture_target は監視ループに move されるので、ここで未設定なら
@@ -203,6 +208,14 @@ pub fn start<R: Runtime>(
     // mortal の再起動時に同じ引数で `spawn_mortal` を呼ぶため
     // 監視スレッドへ持ち込む。
     let mortal_model_path_for_thread = mortal_model_path.clone();
+    // 同様に、recognition の frame request に乗せるため監視スレッドへ持ち込む。
+    //
+    // TODO(future): 監視中に ROI を更新したいユースケース (キャリブレーションを
+    // 微調整しながら結果を見たい) では、`Arc<Mutex<RoiCalibration>>` または
+    // `Arc<ArcSwap<RoiCalibration>>` に切り替えて、設定保存時にホットスワップ
+    // できるようにする。MVP は「停止 → ROI 編集 → 再開」で運用する想定なので
+    // ひとまず clone で固定する (gemini review on PR #42)。
+    let roi_for_thread = roi_calibration.clone();
 
     let join = std::thread::spawn(move || {
         info!(target: "monitor", "monitor loop started");
@@ -245,6 +258,7 @@ pub fn start<R: Runtime>(
                 frame_id,
                 recognition_proc.as_ref(),
                 mortal_proc.as_ref(),
+                &roi_for_thread,
             ) {
                 Ok((inference, board)) => {
                     let payload = InferenceEventPayload { inference, board };
@@ -419,6 +433,7 @@ fn run_cycle(
     frame_id: i64,
     recognition: &PythonProcess,
     mortal: &PythonProcess,
+    roi_calibration: &RoiCalibration,
 ) -> Result<(InferenceResult, Option<GameBoardSummary>), CycleError> {
     if capture_target.trim().is_empty() {
         return Err(CycleError::NoTarget);
@@ -430,10 +445,19 @@ fn run_cycle(
         capture::encode_png_base64(&img).map_err(|e| CycleError::PngEncode(e.to_string()))?;
 
     // recognition: フレーム送信 → tenhou_json 受信
+    // issue #10: roi_calibration は比率指定で、Python 側はキャプチャサイズに
+    // 掛け合わせて領域を切り出す。未キャリブレーション時もフィールドは送るが
+    // 各領域は null になる (Python 側はフォールバックで全画面を見る想定)。
+    // 送信前に必ず `sanitize_roi_calibration` を通し、破損値 (NaN / 負値 /
+    // 1 超過 / 端越え) を None に落としてから渡す。Python 側のクロップは
+    // `[0..1]` 前提なので、ここで弾かないと無効領域でランタイムエラーを起こす
+    // (CodeRabbit Major on PR #42)。
+    let safe_roi = sanitize_roi_calibration(roi_calibration);
     let frame_req = serde_json::json!({
         "type": "frame",
         "id": frame_id,
         "image_b64": image_b64,
+        "roi_calibration": safe_roi,
     });
     // 直前のサイクルがタイムアウトで終わった場合、その応答が今このサイクルの
     // 受信窓に滑り込んでくる可能性がある。drain だけでは送信〜recv の隙間で
@@ -861,6 +885,46 @@ fn validate_pong(line: &str) -> Result<(), String> {
     }
 }
 
+/// ROI 矩形が `[0..1]` の単位空間に収まり、幅高さが正の有限値であることを判定する。
+///
+/// Python 側のクロップは `(x, y, w, h)` を画像サイズに掛け合わせて切り出す前提で、
+/// 範囲外や負値が来るとそこで例外になる。ここで弾けば「設定が壊れていれば
+/// 全画面フォールバック」に倒せる。
+fn valid_rect(r: &RoiRect) -> bool {
+    r.x.is_finite()
+        && r.y.is_finite()
+        && r.w.is_finite()
+        && r.h.is_finite()
+        && r.w > 0.0
+        && r.h > 0.0
+        && r.x >= 0.0
+        && r.y >= 0.0
+        && r.x + r.w <= 1.0
+        && r.y + r.h <= 1.0
+}
+
+fn sanitize_opt_rect(v: Option<RoiRect>) -> Option<RoiRect> {
+    v.filter(valid_rect)
+}
+
+/// `roi_calibration` を recognition に送る直前のサニタイズ。
+/// 無効値はフィールドごと `None` に落として、Python 側を全画面フォールバック
+/// 経路に倒す (CodeRabbit Major on PR #42)。
+fn sanitize_roi_calibration(src: &RoiCalibration) -> RoiCalibration {
+    RoiCalibration {
+        hand: sanitize_opt_rect(src.hand),
+        doras: sanitize_opt_rect(src.doras),
+        rivers: RiverRois {
+            self_seat: sanitize_opt_rect(src.rivers.self_seat),
+            right: sanitize_opt_rect(src.rivers.right),
+            across: sanitize_opt_rect(src.rivers.across),
+            left: sanitize_opt_rect(src.rivers.left),
+        },
+        round_info: sanitize_opt_rect(src.round_info),
+        self_wind: sanitize_opt_rect(src.self_wind),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,5 +1032,115 @@ mod tests {
         assert!(response_id_matches(r#"{"type":"result"}"#, 7));
         // 非整数 id → accept (同上)
         assert!(response_id_matches(r#"{"id":"7","type":"result"}"#, 7));
+    }
+
+    /// `valid_rect` は単位空間 [0,1] に収まる正の矩形だけを受け入れる
+    /// (CodeRabbit Major on PR #42)。
+    #[test]
+    fn valid_rect_accepts_unit_square_and_rejects_out_of_range() {
+        // 正常系
+        assert!(valid_rect(&RoiRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0
+        }));
+        assert!(valid_rect(&RoiRect {
+            x: 0.1,
+            y: 0.2,
+            w: 0.3,
+            h: 0.4
+        }));
+        // 負の x / y
+        assert!(!valid_rect(&RoiRect {
+            x: -0.01,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5
+        }));
+        assert!(!valid_rect(&RoiRect {
+            x: 0.0,
+            y: -0.01,
+            w: 0.5,
+            h: 0.5
+        }));
+        // 0 幅 / 0 高さ
+        assert!(!valid_rect(&RoiRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.0,
+            h: 0.5
+        }));
+        assert!(!valid_rect(&RoiRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.5,
+            h: 0.0
+        }));
+        // 端越え
+        assert!(!valid_rect(&RoiRect {
+            x: 0.6,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5
+        }));
+        assert!(!valid_rect(&RoiRect {
+            x: 0.0,
+            y: 0.6,
+            w: 0.5,
+            h: 0.5
+        }));
+        // NaN / Infinity
+        assert!(!valid_rect(&RoiRect {
+            x: f64::NAN,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5
+        }));
+        assert!(!valid_rect(&RoiRect {
+            x: 0.0,
+            y: 0.0,
+            w: f64::INFINITY,
+            h: 0.5
+        }));
+    }
+
+    /// `sanitize_roi_calibration` は無効値を `None` に落とし、有効値はそのまま残す。
+    /// 鍵となるのは「壊れた値 1 つでフルキャリブレーションが捨てられない」こと。
+    #[test]
+    fn sanitize_roi_calibration_drops_invalid_only() {
+        let mut roi = RoiCalibration::default();
+        let good = RoiRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.2,
+            h: 0.2,
+        };
+        let bad_negative = RoiRect {
+            x: -0.1,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+        };
+        let bad_overflow = RoiRect {
+            x: 0.8,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+        };
+        roi.hand = Some(good);
+        roi.doras = Some(bad_negative);
+        roi.rivers.self_seat = Some(good);
+        roi.rivers.right = Some(bad_overflow);
+        roi.round_info = Some(good);
+        roi.self_wind = None;
+
+        let cleaned = sanitize_roi_calibration(&roi);
+        assert!(cleaned.hand.is_some());
+        assert!(cleaned.doras.is_none(), "negative x must be dropped");
+        assert!(cleaned.rivers.self_seat.is_some());
+        assert!(cleaned.rivers.right.is_none(), "x+w > 1.0 must be dropped");
+        assert!(cleaned.round_info.is_some());
+        assert!(cleaned.self_wind.is_none());
     }
 }
