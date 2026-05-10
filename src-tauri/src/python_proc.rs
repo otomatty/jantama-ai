@@ -241,6 +241,21 @@ pub fn resolve_python_command<R: Runtime>(
             exe_path.display()
         )));
     }
+    // Unix では同梱時に実行ビットが落ちる経路があり、そのまま spawn すると
+    // "Permission denied" になって Phase F の問題と気付きにくい。事前に
+    // 実行ビットを確認して明示的なエラーで返す。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&exe_path) {
+            if meta.permissions().mode() & 0o111 == 0 {
+                return Err(PythonProcError::NotFound(format!(
+                    "{} に実行権限がありません (Phase F のバンドル手順または chmod +x を確認)",
+                    exe_path.display()
+                )));
+            }
+        }
+    }
     Ok(ResolvedCommand {
         program: exe_path,
         args: Vec::new(),
