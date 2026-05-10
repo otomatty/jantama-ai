@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { MainScreen } from "@/screens/MainScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
+import { CalibrationScreen } from "@/screens/CalibrationScreen";
 import { useAppState } from "@/state/appState";
-import { loadSettings } from "@/lib/tauriCommands";
-import type { AppError, GameBoardSummary, InferenceResult } from "@/types";
+import { loadSettings, saveSettings } from "@/lib/tauriCommands";
+import type { AppError, AppSettings, GameBoardSummary, InferenceResult } from "@/types";
 
-type Screen = "main" | "settings";
+type Screen = "main" | "settings" | "calibration";
 
 function App() {
   const { state, setPhase, setSettings, setMonitoring, setInference, setBoard, setError } =
@@ -98,12 +99,33 @@ function App() {
       <SettingsScreen
         initialSettings={state.settings}
         onBack={() => setScreen("main")}
+        onOpenCalibration={() => setScreen("calibration")}
         onSaved={(next) => {
           setSettings(next);
           setPhase(
             next.capture_target_window_id && next.mortal_model_path ? "idle" : "uninitialized",
           );
           setScreen("main");
+        }}
+      />
+    );
+  }
+
+  if (screen === "calibration") {
+    return (
+      <CalibrationScreen
+        settings={state.settings}
+        onBack={() => setScreen("settings")}
+        onSaved={async (next: AppSettings) => {
+          // キャリブレーションは「保存=即永続化」して設定画面に戻す。設定画面側の
+          // 保存ボタンを押し忘れてもキャリブレーション結果は失われない。
+          try {
+            await saveSettings(next);
+          } catch {
+            // 永続化失敗時もメモリ上の設定は更新しておき、ユーザに再保存を促す。
+          }
+          setSettings(next);
+          setScreen("settings");
         }}
       />
     );

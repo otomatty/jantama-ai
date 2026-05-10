@@ -1,16 +1,23 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronLeft } from "lucide-react";
+import { ChevronDown, ChevronLeft, Crop } from "lucide-react";
 import { type AppSettings, type CaptureWindow, type InferenceBackend } from "@/types";
 import { listCaptureWindows, saveSettings } from "@/lib/tauriCommands";
+import { countRoi } from "@/lib/roiCalibration";
 import { cn } from "@/lib/utils";
 
 interface SettingsScreenProps {
   initialSettings: AppSettings;
   onBack: () => void;
+  onOpenCalibration: () => void;
   onSaved: (next: AppSettings) => void;
 }
 
-export function SettingsScreen({ initialSettings, onBack, onSaved }: SettingsScreenProps) {
+export function SettingsScreen({
+  initialSettings,
+  onBack,
+  onOpenCalibration,
+  onSaved,
+}: SettingsScreenProps) {
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [windows, setWindows] = useState<CaptureWindow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,6 +100,32 @@ export function SettingsScreen({ initialSettings, onBack, onSaved }: SettingsScr
     }
   };
 
+  const handleOpenCalibration = async () => {
+    // 設定画面で編集中の値 (キャプチャ対象 / 保存期間 etc) をキャリブレーション
+    // 起動前に永続化する。キャリブレーション画面 → 戻るで設定画面が再マウント
+    // されるため、ここで保存しないと編集中の値が失われる。
+    setSaveError(null);
+    const normalized: AppSettings = {
+      ...settings,
+      data_retention_days: {
+        inference_log: clampDay(settings.data_retention_days.inference_log),
+        tile_image: clampDay(settings.data_retention_days.tile_image),
+        error_log: clampDay(settings.data_retention_days.error_log),
+      },
+    };
+    try {
+      await saveSettings(normalized);
+      // ローカル state も保存値に揃える (clamp 適用済み)
+      setSettings(normalized);
+    } catch {
+      // 永続化失敗してもキャリブレーション自体は実行可能。エラーだけ通知して続行。
+      setSaveError("設定の保存に失敗しました (キャリブレーションは続行できます)");
+    }
+    onOpenCalibration();
+  };
+
+  const roiCount = countRoi(settings.roi_calibration);
+
   const modelFileName = filenameOf(settings.mortal_model_path);
   const modelFileDir = dirOf(settings.mortal_model_path);
 
@@ -129,6 +162,28 @@ export function SettingsScreen({ initialSettings, onBack, onSaved }: SettingsScr
             <Hint tone="danger">{windowsError}</Hint>
           ) : (
             <Hint>起動中のウィンドウから選択</Hint>
+          )}
+        </SettingGroup>
+
+        <SettingGroup label="ROI キャリブレーション">
+          <button
+            type="button"
+            onClick={handleOpenCalibration}
+            disabled={!settings.capture_target_window_id}
+            className="flex w-full cursor-pointer items-center justify-between rounded-md border border-ink-200 bg-white px-3 py-2.5 font-jp text-[13px] text-ink-900 transition-colors hover:bg-ink-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="flex items-center gap-2">
+              <Crop className="h-3.5 w-3.5 text-ink-700" strokeWidth={2} />
+              キャプチャしてキャリブレーション
+            </span>
+            <span className="font-mono text-[10px] text-ink-500">
+              {roiCount > 0 ? `${roiCount} 領域` : "未設定"}
+            </span>
+          </button>
+          {settings.capture_target_window_id ? (
+            <Hint>雀魂のウィンドウを 1 枚キャプチャして 8 領域をドラッグ指定</Hint>
+          ) : (
+            <Hint tone="danger">先にキャプチャ対象ウィンドウを選択してください</Hint>
           )}
         </SettingGroup>
 

@@ -7,6 +7,7 @@ use crate::types::{
 };
 use crate::{capture, monitor, AppState};
 use chrono::Utc;
+use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_store::StoreExt;
 
@@ -68,6 +69,7 @@ pub async fn start_monitoring(app: AppHandle, state: State<'_, AppState>) -> Res
         capture_target: target,
         mortal_model_path,
         inference_backend: settings.inference_backend,
+        roi_calibration: settings.roi_calibration.clone(),
     };
 
     let handle = monitor::start(app.clone(), config).map_err(|e| e.to_string())?;
@@ -82,6 +84,37 @@ pub async fn stop_monitoring(state: State<'_, AppState>) -> Result<(), String> {
         h.stop();
     }
     Ok(())
+}
+
+/// 設定画面の ROI キャリブレーション UI で、対象ウィンドウのスクリーンショットを
+/// 1 枚取得するためのコマンド (issue #10)。
+///
+/// 監視ループの 1Hz ポーリングと違い、これは「ボタン押下時に 1 度だけ」呼ばれる
+/// 想定なので、画像サイズ + base64 PNG をそのままフロントへ返す。フロントは
+/// `<canvas>` に描画してドラッグ操作で矩形を取らせる。
+#[derive(Debug, Clone, Serialize)]
+pub struct CalibrationCapture {
+    pub width: u32,
+    pub height: u32,
+    pub image_b64: String,
+}
+
+#[tauri::command]
+pub async fn capture_window_for_calibration(
+    window_id: String,
+) -> Result<CalibrationCapture, String> {
+    let id = window_id.trim();
+    if id.is_empty() {
+        return Err("キャプチャ対象ウィンドウが選択されていません".into());
+    }
+    let img = capture::capture_window(id).map_err(|e| e.to_string())?;
+    let (width, height) = img.dimensions();
+    let image_b64 = capture::encode_png_base64(&img).map_err(|e| e.to_string())?;
+    Ok(CalibrationCapture {
+        width,
+        height,
+        image_b64,
+    })
 }
 
 #[tauri::command]

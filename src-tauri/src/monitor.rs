@@ -15,6 +15,7 @@ use crate::capture;
 use crate::python_proc::{PythonProcError, PythonProcess};
 use crate::types::{
     ActionType, GameBoardSummary, InferenceBackend, InferenceResult, RecommendationCandidate,
+    RoiCalibration,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -57,6 +58,9 @@ pub struct MonitorConfig {
     /// 空文字列なら mortal を `--stub` モードで起動する。
     pub mortal_model_path: String,
     pub inference_backend: InferenceBackend,
+    /// ROI キャリブレーション (issue #10)。recognition プロセスは
+    /// frame request の `roi_calibration` を見て領域を切り出す。
+    pub roi_calibration: RoiCalibration,
 }
 
 /// `Arc<PythonProcess>` を差し替え可能にしたスロット。
@@ -173,6 +177,7 @@ pub fn start<R: Runtime>(
         capture_target,
         mortal_model_path,
         inference_backend,
+        roi_calibration,
     } = config;
 
     // capture_target は監視ループに move されるので、ここで未設定なら
@@ -203,6 +208,8 @@ pub fn start<R: Runtime>(
     // mortal の再起動時に同じ引数で `spawn_mortal` を呼ぶため
     // 監視スレッドへ持ち込む。
     let mortal_model_path_for_thread = mortal_model_path.clone();
+    // 同様に、recognition の frame request に乗せるため監視スレッドへ持ち込む。
+    let roi_for_thread = roi_calibration.clone();
 
     let join = std::thread::spawn(move || {
         info!(target: "monitor", "monitor loop started");
@@ -245,6 +252,7 @@ pub fn start<R: Runtime>(
                 frame_id,
                 recognition_proc.as_ref(),
                 mortal_proc.as_ref(),
+                &roi_for_thread,
             ) {
                 Ok((inference, board)) => {
                     let payload = InferenceEventPayload { inference, board };
@@ -419,6 +427,7 @@ fn run_cycle(
     frame_id: i64,
     recognition: &PythonProcess,
     mortal: &PythonProcess,
+    roi_calibration: &RoiCalibration,
 ) -> Result<(InferenceResult, Option<GameBoardSummary>), CycleError> {
     if capture_target.trim().is_empty() {
         return Err(CycleError::NoTarget);
@@ -430,10 +439,14 @@ fn run_cycle(
         capture::encode_png_base64(&img).map_err(|e| CycleError::PngEncode(e.to_string()))?;
 
     // recognition: フレーム送信 → tenhou_json 受信
+    // issue #10: roi_calibration は比率指定で、Python 側はキャプチャサイズに
+    // 掛け合わせて領域を切り出す。未キャリブレーション時もフィールドは送るが
+    // 各領域は null になる (Python 側はフォールバックで全画面を見る想定)。
     let frame_req = serde_json::json!({
         "type": "frame",
         "id": frame_id,
         "image_b64": image_b64,
+        "roi_calibration": roi_calibration,
     });
     // 直前のサイクルがタイムアウトで終わった場合、その応答が今このサイクルの
     // 受信窓に滑り込んでくる可能性がある。drain だけでは送信〜recv の隙間で

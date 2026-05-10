@@ -52,6 +52,7 @@ pub fn run() {
             commands::start_monitoring,
             commands::stop_monitoring,
             commands::run_stub_inference,
+            commands::capture_window_for_calibration,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -37,6 +37,51 @@ pub enum InferenceBackend {
     Cpu,
 }
 
+/// ROI 矩形 (PRD §9 / issue #10)。
+///
+/// 比率指定 (0.0〜1.0) で保存する。キャプチャ解像度が変わっても追従できる。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RoiRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// 河 4 領域 (自家・下家・対面・上家)。
+///
+/// 未指定領域は `null` を明示的に書き出す (= `skip_serializing_if` を付けない)。
+/// フロント側 (`src/types/index.ts`) の `RoiCalibration` は各フィールドを
+/// `RoiRect | null` で受け取るため、欠落フィールドだと `undefined` になり
+/// `=== null` 判定が崩れる (Phase C で recognition プロセスが領域有無を
+/// 判別する際にも同じ問題になる)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RiverRois {
+    #[serde(default, rename = "self")]
+    pub self_seat: Option<RoiRect>,
+    #[serde(default)]
+    pub right: Option<RoiRect>,
+    #[serde(default)]
+    pub across: Option<RoiRect>,
+    #[serde(default)]
+    pub left: Option<RoiRect>,
+}
+
+/// 認識用 ROI キャリブレーション (issue #10)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoiCalibration {
+    #[serde(default)]
+    pub hand: Option<RoiRect>,
+    #[serde(default)]
+    pub doras: Option<RoiRect>,
+    #[serde(default)]
+    pub rivers: RiverRois,
+    #[serde(default)]
+    pub round_info: Option<RoiRect>,
+    #[serde(default)]
+    pub self_wind: Option<RoiRect>,
+}
+
 fn default_show_llm_reason() -> bool {
     true
 }
@@ -61,6 +106,10 @@ pub struct AppSettings {
     pub data_retention_days: DataRetentionDays,
     #[serde(default)]
     pub hotkey_settings: Option<serde_json::Value>,
+    /// ROI キャリブレーション (issue #10)。古い設定ファイルとの互換性のため
+    /// `default` でフォールバックする (= 全領域 None)。
+    #[serde(default)]
+    pub roi_calibration: RoiCalibration,
 }
 
 impl Default for AppSettings {
@@ -80,6 +129,7 @@ impl Default for AppSettings {
                 error_log: 90,
             },
             hotkey_settings: None,
+            roi_calibration: RoiCalibration::default(),
         }
     }
 }
@@ -144,4 +194,51 @@ pub struct GameBoardSummary {
     pub score: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub round_label: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// issue #10: `roi_calibration` 未指定の旧 JSON を読み戻しても
+    /// `Default` で全領域 None になることを確認する (互換性レグレッションテスト)。
+    #[test]
+    fn app_settings_deserializes_legacy_json_without_roi_calibration() {
+        let legacy = serde_json::json!({
+            "capture_target_window_id": "1",
+            "capture_target_window_title": "Mahjong Soul",
+            "mortal_model_path": "/path/to/model",
+            "window_position": null,
+            "window_size": null,
+            "data_retention_days": {
+                "inference_log": 30,
+                "tile_image": 7,
+                "error_log": 90
+            }
+        });
+        let parsed: AppSettings = serde_json::from_value(legacy).expect("legacy parse");
+        assert!(parsed.roi_calibration.hand.is_none());
+        assert!(parsed.roi_calibration.rivers.self_seat.is_none());
+        assert!(parsed.roi_calibration.rivers.right.is_none());
+    }
+
+    /// issue #10: river 領域のキーは `self` で永続化される
+    /// (Rust の予約語回避で `self_seat` にしているが JSON 上は `self`)。
+    #[test]
+    fn river_rois_serialize_with_self_key() {
+        let mut roi = RoiCalibration::default();
+        roi.rivers.self_seat = Some(RoiRect {
+            x: 0.1,
+            y: 0.2,
+            w: 0.3,
+            h: 0.4,
+        });
+        let json = serde_json::to_value(&roi).unwrap();
+        let rivers = json.get("rivers").expect("rivers field");
+        assert!(rivers.get("self").is_some());
+        assert!(rivers.get("self_seat").is_none());
+
+        let round_trip: RoiCalibration = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip.rivers.self_seat.unwrap().x, 0.1);
+    }
 }
