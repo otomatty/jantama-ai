@@ -34,6 +34,8 @@ const SLEEP_SLICE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Error)]
 pub enum MonitorError {
+    #[error("監視設定が不正です: {0}")]
+    InvalidConfig(String),
     #[error("認識プロセス起動失敗: {0}")]
     RecognitionSpawn(PythonProcError),
     #[error("Mortal プロセス起動失敗: {0}")]
@@ -110,6 +112,16 @@ pub fn start<R: Runtime>(
         mortal_model_path,
         inference_backend,
     } = config;
+
+    // capture_target は監視ループに move されるので、ここで未設定なら
+    // フォールバック手段なく run_cycle がずっと NoTarget を返し続け、
+    // recognition / mortal の子プロセスを無駄に起動したまま 1Hz で
+    // エラーを emit し続けることになる。spawn 前に弾く。
+    if capture_target.trim().is_empty() {
+        return Err(MonitorError::InvalidConfig(
+            "capture target window id is empty".into(),
+        ));
+    }
 
     info!(target: "monitor", "starting monitor for target='{}'", capture_target);
 

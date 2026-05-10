@@ -162,7 +162,10 @@ impl PythonProcess {
         // Phase D で Python 側 CLI に渡す予定。現状はバックエンドを参照しない。
         let _ = backend;
         let mut cmd = resolve_python_command(app, "mortal")?;
-        if model_path.trim().is_empty() {
+        // 設定値に前後空白が混ざっても有効なパスとして扱えるよう trim する。
+        // trim せずに argparse へ渡すとファイルが見つからないと誤解されがち。
+        let model_path = model_path.trim();
+        if model_path.is_empty() {
             cmd.args.push("--stub".into());
         } else {
             cmd.args.push("--model".into());
@@ -253,7 +256,15 @@ pub fn resolve_python_command<R: Runtime>(
 /// dev ビルド (および `cargo test`) でのみ呼び出される。
 #[cfg(debug_assertions)]
 fn find_uv_executable() -> Result<PathBuf, PythonProcError> {
-    which::which("uv").map_err(|e| {
+    find_uv_executable_in(std::env::var_os("PATH").as_deref())
+}
+
+/// `find_uv_executable` の本体。テスト用に PATH を引数で差し替えられるよう
+/// 分離している (グローバル `std::env::set_var` を触ると並列テストで競合するため)。
+#[cfg(debug_assertions)]
+fn find_uv_executable_in(path: Option<&std::ffi::OsStr>) -> Result<PathBuf, PythonProcError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    which::which_in("uv", path, cwd).map_err(|e| {
         PythonProcError::NotFound(format!(
             "`uv` が PATH にありません ({}). https://docs.astral.sh/uv/ からインストールしてください",
             e
@@ -318,28 +329,21 @@ fn redact_for_log(line: &str) -> String {
     value.to_string()
 }
 
-// `find_uv_executable` は `debug_assertions` でだけ定義されるため、
+// `find_uv_executable_in` は `debug_assertions` でだけ定義されるため、
 // テストモジュールも同条件でゲートしないと `cargo test --release` で
 // コンパイルエラーになる。
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     /// PATH に `uv` がない状態では NotFound エラーが返ることを確認する。
-    /// 元の PATH は revert する。
+    /// プロセス全体の `PATH` を書き換えると並列テストで競合するため、
+    /// PATH を引数で受け取る `find_uv_executable_in` を直接呼んで
+    /// グローバル状態に触れない。
     #[test]
     fn find_uv_returns_not_found_when_path_is_empty() {
-        let original = std::env::var_os("PATH");
-        // SAFETY: テスト並列実行時に他テストが PATH を読むと壊れるが、
-        // 本クレートは PATH をテスト目的で参照する箇所が他にないため、
-        // 明示的にこのテストでだけ操作する。
-        std::env::set_var("PATH", "");
-        let result = find_uv_executable();
-        if let Some(p) = original {
-            std::env::set_var("PATH", p);
-        } else {
-            std::env::remove_var("PATH");
-        }
+        let result = find_uv_executable_in(Some(OsStr::new("")));
         assert!(matches!(result, Err(PythonProcError::NotFound(_))));
     }
 }
