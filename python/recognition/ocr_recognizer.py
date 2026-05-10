@@ -61,7 +61,11 @@ _DIGIT_WHITELIST = "0123456789"
 _SCORE_WHITELIST = "0123456789-"
 
 # `pytesseract.image_to_string` の TesseractNotFoundError を例外名で識別 (型 import を避ける)。
-_TESSERACT_NOT_FOUND_NAMES = {"TesseractNotFoundError", "TesseractError"}
+# 重要: `TesseractError` (非ゼロ終了, e.g. `jpn` 言語データ欠落) はここに含めない。
+# 含めると「設定不備」を「binary 未導入」と誤誘導し、ユーザに `jpn` パック不足の
+# 診断機会を奪う (CodeRabbit on PR #44)。`TesseractError` は毎フレーム単発で
+# 警告を出し続け、ユーザに修正を促す。
+_TESSERACT_NOT_FOUND_NAMES = {"TesseractNotFoundError"}
 
 
 def _crop_roi(bgr_frame: np.ndarray, roi: RoiRect) -> np.ndarray | None:
