@@ -7,7 +7,7 @@ use crate::types::InferenceBackend;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TrySendError};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -17,7 +17,7 @@ use std::time::Duration;
 use tauri::Manager;
 use tauri::{AppHandle, Runtime};
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Error)]
 pub enum PythonProcError {
@@ -44,6 +44,18 @@ enum ReaderEvent {
     Eof,
     Io(std::io::Error),
 }
+
+/// reader→consumer チャネルの上限。
+///
+/// 元実装は `read_line` を consumer スレッドが直接呼んでいたため、OS の pipe
+/// バッファ (Linux で 64KiB 程度) が天井として働いていた。バックグラウンド
+/// reader + 無制限 mpsc に切り替えると、Python が暴走して 1Hz 以上の速度で
+/// stdout に書き続けた場合キューが青天井に伸びてアプリが OOM する可能性が
+/// ある (Codex の指摘)。`sync_channel` で上限を設け、超過分は `try_send` で
+/// 落とすことで pipe バッファ相当の自然なバックプレッシャを取り戻す。
+/// 落とした応答は protocol 層 (`drain_pending` + `id` ミスマッチ) で再同期
+/// できる前提。
+const READER_QUEUE_BOUND: usize = 64;
 
 pub struct PythonProcess {
     child: Mutex<Child>,
@@ -107,7 +119,7 @@ impl PythonProcess {
             .take()
             .ok_or_else(|| PythonProcError::NotFound("stdout".into()))?;
 
-        let (tx, rx) = mpsc::channel::<ReaderEvent>();
+        let (tx, rx) = mpsc::sync_channel::<ReaderEvent>(READER_QUEUE_BOUND);
         let label_for_thread = label.clone();
         let reader_join = std::thread::spawn(move || {
             reader_loop(stdout, tx, label_for_thread);
@@ -280,27 +292,47 @@ impl PythonProcess {
 
 /// stdout を 1 行ずつ読み、`tx` へイベントとして流す reader スレッド本体。
 /// プロセスが死ぬと `read_line` が 0 を返すので `Eof` を送って終了する。
-fn reader_loop(stdout: ChildStdout, tx: mpsc::Sender<ReaderEvent>, label: String) {
+///
+/// `try_send` を使う理由: ブロッキング `send` だと consumer が遅れたときに
+/// reader が send で詰まり、`kill()` 経路で reader を join できなくなる
+/// (consumer は roundtrip lock を握ったまま外部要因で待たされている可能性
+/// がある)。`try_send` で溢れた行は `drain_pending` 相当の扱いとして捨て、
+/// pipe バッファ → reader → 上限付きキューの順でバックプレッシャを掛ける。
+fn reader_loop(stdout: ChildStdout, tx: mpsc::SyncSender<ReaderEvent>, label: String) {
     let mut reader = BufReader::new(stdout);
     loop {
         let mut buf = String::new();
-        match reader.read_line(&mut buf) {
-            Ok(0) => {
-                // 受信側が既にチャネルを drop している場合 (＝PythonProcess
-                // が破棄された) は send が失敗するが、そのまま終了して問題ない。
-                let _ = tx.send(ReaderEvent::Eof);
-                break;
-            }
-            Ok(_) => {
-                if tx.send(ReaderEvent::Line(buf)).is_err() {
-                    // 受信側が消えていればこれ以上読む意味は無い。
-                    break;
+        let event = match reader.read_line(&mut buf) {
+            Ok(0) => ReaderEvent::Eof,
+            Ok(_) => ReaderEvent::Line(buf),
+            Err(e) => ReaderEvent::Io(e),
+        };
+        // 終端イベント (Eof / Io) を送り終えた / 試みた直後はループを抜ける。
+        let is_terminal = matches!(event, ReaderEvent::Eof | ReaderEvent::Io(_));
+        match tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(dropped)) => {
+                // consumer が `READER_QUEUE_BOUND` フレーム以上遅れている。
+                // 古い行は protocol 層から見ても stale なので、ここで捨てる
+                // ことでメモリ青天井化を防ぐ (drain_pending + id ミスマッチが
+                // 受信側で再同期する前提)。
+                if let ReaderEvent::Line(s) = dropped {
+                    warn!(
+                        target: "python_proc",
+                        "[{}] reader queue full (>{}); dropping stale line: {}",
+                        label,
+                        READER_QUEUE_BOUND,
+                        s.trim()
+                    );
                 }
             }
-            Err(e) => {
-                let _ = tx.send(ReaderEvent::Io(e));
+            Err(TrySendError::Disconnected(_)) => {
+                // 受信側が消えていればこれ以上読む意味は無い。
                 break;
             }
+        }
+        if is_terminal {
+            break;
         }
     }
     debug!(target: "python_proc", "[{}] reader thread exited", label);
