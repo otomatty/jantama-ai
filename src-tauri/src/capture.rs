@@ -3,7 +3,14 @@
 // PRD §8.2 Tauri (Rust側) - 画面キャプチャ: `xcap` クレート
 
 use crate::types::CaptureWindow;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use std::error::Error;
+use std::io::Cursor;
+use std::time::Instant;
+use tracing::debug;
+use xcap::image::codecs::png::PngEncoder;
+use xcap::image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use xcap::Window;
 
 pub type CaptureError = Box<dyn Error + Send + Sync>;
@@ -31,8 +38,8 @@ pub fn list_windows() -> Result<Vec<CaptureWindow>, CaptureError> {
 /// 指定 ID のウィンドウをキャプチャして RGBA バイト列 (image::RgbaImage) を返す。
 ///
 /// MVP では Python 認識プロセスへ stdin で渡す前提。
-/// PNG 化したい場合は `image` クレート (xcap が再エクスポート) で encode する。
-pub fn capture_window(window_id: &str) -> Result<xcap::image::RgbaImage, CaptureError> {
+/// PNG 化したい場合は `encode_png_base64` を使う。
+pub fn capture_window(window_id: &str) -> Result<RgbaImage, CaptureError> {
     let windows = Window::all()?;
     let w = windows
         .into_iter()
@@ -42,4 +49,52 @@ pub fn capture_window(window_id: &str) -> Result<xcap::image::RgbaImage, Capture
         })?;
     let image = w.capture_image()?;
     Ok(image)
+}
+
+/// `RgbaImage` を PNG にエンコードし base64 (STANDARD) 文字列で返す。
+///
+/// Python 認識プロセスへ送る `{"type":"frame","image_b64":"..."}` の payload を
+/// 組み立てるためのユーティリティ。PRD §7.1 の目安は 1920x1080 を 50ms 以内。
+pub fn encode_png_base64(img: &RgbaImage) -> Result<String, CaptureError> {
+    let started = Instant::now();
+    let (width, height) = img.dimensions();
+    let mut png_bytes = Vec::new();
+    PngEncoder::new(Cursor::new(&mut png_bytes)).write_image(
+        img.as_raw(),
+        width,
+        height,
+        ExtendedColorType::Rgba8,
+    )?;
+    let encoded = B64.encode(&png_bytes);
+    debug!(
+        target: "capture",
+        "encode_png_base64: {}x{} png={}B b64={}B in {}us",
+        width,
+        height,
+        png_bytes.len(),
+        encoded.len(),
+        started.elapsed().as_micros()
+    );
+    Ok(encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xcap::image::{load_from_memory_with_format, ImageFormat, Rgba};
+
+    #[test]
+    fn encode_png_base64_roundtrip_red_10x10() {
+        let img = RgbaImage::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
+        let encoded = encode_png_base64(&img).expect("encode_png_base64 failed");
+
+        let decoded_bytes = B64.decode(&encoded).expect("base64 decode failed");
+        let decoded = load_from_memory_with_format(&decoded_bytes, ImageFormat::Png)
+            .expect("png decode failed")
+            .to_rgba8();
+
+        assert_eq!(decoded.dimensions(), (10, 10));
+        assert_eq!(decoded.get_pixel(0, 0), &Rgba([255, 0, 0, 255]));
+        assert_eq!(decoded.get_pixel(9, 9), &Rgba([255, 0, 0, 255]));
+    }
 }
