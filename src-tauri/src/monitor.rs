@@ -212,13 +212,20 @@ pub fn start<R: Runtime>(
         // スモーク側が握ったまま recv で詰まり、本ループのフレーム要求が
         // 出せなくなる (#36 review by codex)。recognition と mortal は別プロセスなので
         // 双方のスモークだけはスレッド分割して並列化し、起動時間を短縮する。
+        // 起動時のスモークは「初回ロードで多少詰まっても本ループは回す」方針。
+        // 戻り値は捨てて、失敗していれば最初の数サイクルが timeout 経路で
+        // recognition-error を吐くだけに留める (UI 側で error phase に倒れる)。
         let rec_smoke = {
             let p = rec_for_thread.current();
-            std::thread::spawn(move || smoke_ping(p.as_ref(), "recognition"))
+            std::thread::spawn(move || {
+                let _ = smoke_ping(p.as_ref(), "recognition");
+            })
         };
         let mortal_smoke = {
             let p = mortal_for_thread.current();
-            std::thread::spawn(move || smoke_ping(p.as_ref(), "mortal"))
+            std::thread::spawn(move || {
+                let _ = smoke_ping(p.as_ref(), "mortal");
+            })
         };
         let _ = rec_smoke.join();
         let _ = mortal_smoke.join();
@@ -613,17 +620,44 @@ fn handle_cycle_error<R: Runtime>(
             // そのまま次の run_cycle に入ると 3 秒タイムアウトを使い切って
             // 再起動枠を浪費するだけになりがち。長めの SMOKE_RECV_TIMEOUT で
             // 一度 ping を流してウォームアップし、応答可能な状態を確認してから
-            // 本ループへ戻す。失敗しても次の run_cycle 側のタイムアウト経路で
-            // 改めて検知できるので smoke 自身のエラーは握り潰す。
+            // 本ループへ戻す。
+            //
+            // smoke が失敗した場合は再起動を「成功」と見なせない: 不健全な
+            // プロセスをスロットに残しても次サイクル以降は restart 枠を
+            // 既に使い切っているのでエラーを emit し続けるだけになる。スロットの
+            // プロセスを kill し、追加の `recognition-error` を流して UI を
+            // error phase に固定する。
             let warm = match dead {
                 DeadProcess::Recognition => rec_slot.current(),
                 DeadProcess::Mortal => mortal_slot.current(),
             };
-            let label = match dead {
+            let smoke_label = match dead {
                 DeadProcess::Recognition => "recognition",
                 DeadProcess::Mortal => "mortal",
             };
-            smoke_ping(warm.as_ref(), label);
+            if let Err(reason) = smoke_ping(warm.as_ref(), smoke_label) {
+                warn!(
+                    target: "monitor",
+                    "{:?} smoke after restart failed: {}; killing freshly-spawned process",
+                    dead, reason
+                );
+                drop(warm);
+                match dead {
+                    DeadProcess::Recognition => rec_slot.kill(),
+                    DeadProcess::Mortal => mortal_slot.kill(),
+                }
+                let payload = RecognitionErrorPayload {
+                    kind: match dead {
+                        DeadProcess::Recognition => "recognition",
+                        DeadProcess::Mortal => "inference",
+                    },
+                    message: format!("restart smoke failed: {}", reason),
+                    occurred_at: Utc::now().to_rfc3339(),
+                };
+                if let Err(emit_err) = app.emit("recognition-error", &payload) {
+                    warn!(target: "monitor", "emit recognition-error failed: {}", emit_err);
+                }
+            }
         }
         Err(spawn_err) => {
             warn!(
@@ -734,7 +768,11 @@ fn self_wind_index(self_wind: &str) -> Option<usize> {
 /// 1 往復の ping/pong を同期実行する。本ループ突入前に呼ばれる前提なので、
 /// `request_line` の roundtrip ロックを握っても誰も待っていない。応答が無く
 /// 詰まった場合でも stop() の kill() が `recv_line` を解錠して戻ってくる。
-fn smoke_ping(proc: &PythonProcess, label: &'static str) {
+///
+/// 戻り値は warm-up 健全性の判定に使う。起動時のスモーク (start() 直下) では
+/// 結果を捨てて UI への影響を抑え、再起動後のスモーク (handle_cycle_error)
+/// では失敗を「不健全な再起動」として扱い直すために `Err` を返す。
+fn smoke_ping(proc: &PythonProcess, label: &str) -> Result<(), String> {
     let resp = match proc.request_line_timeout(
         &format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID),
         SMOKE_RECV_TIMEOUT,
@@ -742,17 +780,23 @@ fn smoke_ping(proc: &PythonProcess, label: &'static str) {
         Ok(s) => s,
         Err(e) => {
             warn!(target: "monitor", "smoke ping/pong [{}] failed: {}", label, e);
-            return;
+            return Err(e.to_string());
         }
     };
     let trimmed = resp.trim();
     match validate_pong(trimmed) {
-        Ok(()) => info!(target: "monitor", "smoke ping/pong [{}]: ok ({})", label, trimmed),
-        Err(reason) => warn!(
-            target: "monitor",
-            "smoke ping/pong [{}]: {} (raw: {})",
-            label, reason, trimmed
-        ),
+        Ok(()) => {
+            info!(target: "monitor", "smoke ping/pong [{}]: ok ({})", label, trimmed);
+            Ok(())
+        }
+        Err(reason) => {
+            warn!(
+                target: "monitor",
+                "smoke ping/pong [{}]: {} (raw: {})",
+                label, reason, trimmed
+            );
+            Err(reason)
+        }
     }
 }
 
