@@ -68,6 +68,7 @@ class TileRecognizer:
         self._templates: dict[str, np.ndarray] = {}
         self._tmpl_size: tuple[int, int] | None = None  # (h, w)
         self._loaded = False
+        self._warned_no_roi = False
         self._load()
 
     def _load(self) -> None:
@@ -101,6 +102,21 @@ class TileRecognizer:
             )
             return
 
+        # 部分セットでマッチングを走らせると「欠けた牌種」のセグメントが必ず
+        # 残った牌に誤分類される (Codex P2 on PR #43)。安全側に倒し、37 種
+        # 全部揃わないと recognize_hand を有効化しない。
+        missing = [code for code in TILE_CODES if code not in loaded]
+        if missing:
+            logger.warning(
+                "partial tile template set in %s: missing %d/%d (%s); "
+                "recognize_hand disabled until all templates are present",
+                self.template_dir,
+                len(missing),
+                len(TILE_CODES),
+                ", ".join(missing),
+            )
+            return
+
         self._templates = loaded
         self._tmpl_size = first_size
         self._loaded = True
@@ -114,8 +130,22 @@ class TileRecognizer:
         """手牌領域から牌コード列と最低信頼度を返す。
 
         テンプレ未ロード or ROI 未指定なら ([], 0.0)。
+
+        ROI 未指定時は「全画面を 14 等分」というフォールバックは取らない。
+        手牌領域が画面のごく一部 (画面下端の細い帯) なので、未キャリブで
+        全画面を 14 分割しても意味のある結果が出ず、誤マッチ由来のノイズで
+        Mortal を惑わすほうが害が大きい。代わりに 1 度だけ警告ログを出して
+        ユーザに ROI キャリブレーションを促す。
         """
-        if not self._loaded or hand_roi is None:
+        if not self._loaded:
+            return [], 0.0
+        if hand_roi is None:
+            if not self._warned_no_roi:
+                logger.warning(
+                    "hand ROI not calibrated; recognize_hand returning empty. "
+                    "Run ROI calibration (issue #10) to enable hand recognition."
+                )
+                self._warned_no_roi = True
             return [], 0.0
         if bgr_frame is None or bgr_frame.size == 0:
             return [], 0.0
@@ -131,6 +161,11 @@ class TileRecognizer:
         crop = bgr_frame[y0:y1, x0:x1]
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         crop_h, crop_w = gray.shape[:2]
+        # MVP: 単純に 14 等分する。雀魂 UI では 13 牌目とツモ牌の間に数十 px
+        # の隙間があるが、その隙間部分は std がしきい値未満になるので空白判定
+        # で自然にスキップされる前提 (Gemini medium on PR #43)。隙間幅まで
+        # 込みでスロット境界を補正する高精度版は #16 でテンプレ実画像が
+        # 揃ってから精度計測した上で検討する。
         seg_w_base = crop_w // HAND_SLOTS
 
         tiles: list[str] = []

@@ -87,8 +87,8 @@ def handle_frame(req: dict[str, Any]) -> dict[str, Any]:
             tiles, conf = _get_recognizer().recognize_hand(bgr, hand_roi)
             tenhou_json["hand"] = tiles
             confidence = conf
-    except Exception as e:  # noqa: BLE001 — recognition プロセスを落とさない
-        logger.warning("hand recognition failed for id=%s: %s", frame_id, e)
+    except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
+        logger.warning("hand recognition failed for id=%s", frame_id, exc_info=True)
 
     return {
         "type": "result",

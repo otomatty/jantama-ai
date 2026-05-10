@@ -71,6 +71,31 @@ def test_recognize_returns_empty_when_roi_none(tmp_path: Path) -> None:
     assert conf == 0.0
 
 
+def test_no_roi_warning_logged_only_once(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    _write_all_templates(tmp_path)
+    rec = TileRecognizer(tmp_path)
+    bgr = np.zeros((100, 100, 3), dtype=np.uint8)
+    with caplog.at_level("WARNING", logger="recognition"):
+        for _ in range(5):
+            rec.recognize_hand(bgr, None)
+    no_roi_warnings = [r for r in caplog.records if "ROI not calibrated" in r.getMessage()]
+    assert len(no_roi_warnings) == 1
+
+
+def test_partial_template_set_fails_closed(tmp_path: Path) -> None:
+    """Codex P2 on PR #43: 部分セットで誤認識を防ぐため、37 種揃わなければ無効化。"""
+    # 1m から 9m まで (9 枚) だけ書き出す → 28/37 不足
+    for code in TILE_CODES[:9]:
+        cv2.imwrite(str(tmp_path / f"{code}.png"), _make_tile_template(TILE_CODES.index(code)))
+    rec = TileRecognizer(tmp_path)
+    # 一見テンプレが「ある」状態でも、未ロード扱いで empty を返す
+    bgr = np.zeros((TMPL_H, TMPL_W * HAND_SLOTS, 3), dtype=np.uint8) + 100
+    bgr[5:25, 5:200] = np.random.default_rng(0).integers(0, 256, (20, 195, 3), dtype=np.uint8)
+    tiles, conf = rec.recognize_hand(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
+    assert tiles == []
+    assert conf == 0.0
+
+
 def test_recognize_returns_empty_when_all_segments_blank(tmp_path: Path) -> None:
     _write_all_templates(tmp_path)
     rec = TileRecognizer(tmp_path)
