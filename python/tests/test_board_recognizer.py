@@ -441,3 +441,77 @@ def test_board_recognizer_field_failures_are_isolated(
     assert tenhou["scores"] == DEFAULT_TENHOU_JSON["scores"]
     assert tenhou["turn"] == DEFAULT_TENHOU_JSON["turn"]
     assert conf > 0.99
+
+
+def test_board_recognizer_drops_scores_when_self_wind_not_recognized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Codex P1 on PR #44: scores OCR が通っても self_wind が未認識なら scores は採用しない。
+
+    scores は座順 (東→南→西→北) で並ぶため、self_wind が既定 "東" のままだと、
+    build_board_summary (Rust) は scores[0] を引いて非起家局面で他家の点数を
+    自分の持ち点として UI に流す。これを防ぐため self_wind 実認識が無いフレームでは
+    scores を既定値のままに残し、初回のみ警告を出す。
+    """
+    # wind テンプレなし (templates/winds/ 未作成) で scores OCR は成功させる。
+    values = iter(["25000", "30000", "20000", "25000"] * 2)  # 複数フレーム分
+
+    class _Side:
+        def image_to_string(
+            self, img: np.ndarray, lang: str = "eng", config: str = ""
+        ) -> str:  # noqa: ARG002
+            return next(values)
+
+    ocr_recognizer._PYTESSERACT.module = _Side()
+    ocr_recognizer._PYTESSERACT.tried = True
+
+    rec = BoardRecognizer(tmp_path)
+    bgr = np.full((40, 160, 3), 128, dtype=np.uint8)
+    bgr[5:35, 5:155] = 255
+
+    with caplog.at_level("WARNING", logger="recognition"):
+        for _ in range(2):
+            tenhou, _ = rec.recognize(bgr, {"scores": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}})
+            # scores 採用されず既定値 [25000, 25000, 25000, 25000] のまま
+            assert tenhou["scores"] == DEFAULT_TENHOU_JSON["scores"]
+            assert tenhou["self_wind"] == "東"  # 既定値
+
+    # 警告は対局中 1 回のみ (毎フレーム監視ループでスパムしない)
+    warns = [r for r in caplog.records if "scores OCR succeeded but self_wind" in r.getMessage()]
+    assert len(warns) == 1
+
+
+def test_board_recognizer_accepts_scores_when_both_recognized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """self_wind と scores の両方が認識できれば scores はそのまま採用される。"""
+    _write_all_wind_templates(tmp_path / "winds")
+
+    values = iter(["25000", "30000", "20000", "25000"])
+
+    class _Side:
+        def image_to_string(
+            self, img: np.ndarray, lang: str = "eng", config: str = ""
+        ) -> str:  # noqa: ARG002
+            return next(values)
+
+    ocr_recognizer._PYTESSERACT.module = _Side()
+    ocr_recognizer._PYTESSERACT.tried = True
+
+    rec = BoardRecognizer(tmp_path)
+    # 南風テンプレと完全一致する画像を self_wind ROI に流す → "南" が返る
+    south_gray = _make_pattern(1001)
+    bgr = cv2.cvtColor(south_gray, cv2.COLOR_GRAY2BGR)
+
+    tenhou, _ = rec.recognize(
+        bgr,
+        {
+            "self_wind": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+            "scores": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        },
+    )
+    assert tenhou["self_wind"] == "南"
+    assert tenhou["scores"] == [25000, 30000, 20000, 25000]

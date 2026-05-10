@@ -56,6 +56,9 @@ class BoardRecognizer:
         self.tile_recognizer = TileRecognizer(template_dir)
         # winds テンプレは `templates/winds/` 配下に置く規約 (templates/README.md)。
         self.wind_recognizer = WindRecognizer(template_dir / "winds")
+        # 「scores OCR は通ったが self_wind が未認識」状態の警告は対局ごとに 1 度。
+        # 毎フレーム出すと監視ループのログを埋め尽くす。
+        self._warned_scores_without_wind = False
 
     def recognize(
         self,
@@ -104,12 +107,14 @@ class BoardRecognizer:
             logger.warning("dora recognition failed", exc_info=True)
 
         # ----- 自風 (issue #12) -----
+        self_wind_recognized = False
         try:
             wind_label, _wind_conf = self.wind_recognizer.recognize(
                 bgr_frame, _roi(calib, "self_wind")
             )
             if wind_label is not None:
                 tenhou["self_wind"] = wind_label
+                self_wind_recognized = True
         except Exception:  # noqa: BLE001
             logger.warning("self_wind recognition failed", exc_info=True)
 
@@ -134,10 +139,24 @@ class BoardRecognizer:
             logger.warning("turn recognition failed", exc_info=True)
 
         # ----- 点棒 (issue #12) -----
+        # Codex P1 on PR #44: scores 配列は座順 (東→南→西→北) なので、self_wind が
+        # 未認識のまま既定 "東" だと、非起家局面で他家の点数が「自分の持ち点」
+        # として UI に流れる (build_board_summary が scores[self_wind_index] を引く)。
+        # self_wind の実認識が成功したフレームのみ scores を採用し、それ以外は
+        # 既定値 (全 25000) のままにしてフロントの「持ち点表示は信頼できない」
+        # フォールバックに倒す。
         try:
             scores = ocr_recognizer.recognize_scores(bgr_frame, _roi(calib, "scores"))
             if scores is not None:
-                tenhou["scores"] = scores
+                if self_wind_recognized:
+                    tenhou["scores"] = scores
+                elif not self._warned_scores_without_wind:
+                    logger.warning(
+                        "scores OCR succeeded but self_wind is not recognized; "
+                        "dropping scores to avoid wrong-seat score lookup. "
+                        "Install wind templates (issue #16) to enable score reporting."
+                    )
+                    self._warned_scores_without_wind = True
         except Exception:  # noqa: BLE001
             logger.warning("scores recognition failed", exc_info=True)
 
