@@ -19,7 +19,7 @@ use crate::types::{
 use chrono::Utc;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -31,6 +31,13 @@ const SMOKE_PING_ID: i64 = 0;
 const FRAME_INTERVAL: Duration = Duration::from_secs(1);
 /// 停止フラグへの応答性を保つために sleep を細切れにする粒度。
 const SLEEP_SLICE: Duration = Duration::from_millis(100);
+/// PRD §7.4 (信頼性要件) に基づく Python 応答待ちタイムアウト。
+/// 1Hz の監視ループに対し 3 秒待っても応答が無ければ「認識失敗 / 推論失敗」
+/// として次フレームへスキップする。
+const PYTHON_RECV_TIMEOUT: Duration = Duration::from_secs(3);
+/// 起動直後の ping/pong は `uv run` のロード時間を踏まえて長めに取る。
+/// (1 サイクル目の本ループ前に 1 度だけ流すため、ループ全体の 1Hz には影響しない)
+const SMOKE_RECV_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum MonitorError {
@@ -52,10 +59,52 @@ pub struct MonitorConfig {
     pub inference_backend: InferenceBackend,
 }
 
+/// `Arc<PythonProcess>` を差し替え可能にしたスロット。
+///
+/// ProcessDied 検知時に新しいプロセスへ載せ替えても、外部から
+/// 共有されている `Arc<ProcessSlot>` のハンドルはそのまま使える。
+/// `MonitorHandle::stop` 経由で殺しに来る場合と、監視スレッドが
+/// 再起動で差し替える場合の両方を扱う。
+pub struct ProcessSlot {
+    inner: Mutex<Arc<PythonProcess>>,
+}
+
+impl ProcessSlot {
+    fn new(proc: PythonProcess) -> Self {
+        Self {
+            inner: Mutex::new(Arc::new(proc)),
+        }
+    }
+
+    /// 現在格納している `PythonProcess` への共有ハンドルを取得する。
+    /// 監視スレッドはサイクルごとにこれを呼んで最新のプロセスへ I/O する。
+    pub fn current(&self) -> Arc<PythonProcess> {
+        self.inner.lock().unwrap().clone()
+    }
+
+    /// 古いプロセスを殺してから新プロセスへ差し替える。
+    fn replace(&self, new_proc: PythonProcess) {
+        let new_arc = Arc::new(new_proc);
+        let old = {
+            let mut guard = self.inner.lock().unwrap();
+            std::mem::replace(&mut *guard, new_arc)
+        };
+        // 残っているかもしれない古いプロセスは確実に止める。
+        // 他に Arc を持っている呼び出し側がいれば、Drop ではなくここで明示的に
+        // kill してロック中の recv_line を解放させる。
+        old.kill();
+    }
+
+    /// 現在格納しているプロセスを kill する (差し替えはしない)。
+    fn kill(&self) {
+        self.inner.lock().unwrap().kill();
+    }
+}
+
 pub struct MonitorHandle {
     pub stop_flag: Arc<AtomicBool>,
-    pub recognition: Arc<PythonProcess>,
-    pub mortal: Arc<PythonProcess>,
+    pub recognition: Arc<ProcessSlot>,
+    pub mortal: Arc<ProcessSlot>,
     pub join: Option<JoinHandle<()>>,
 }
 
@@ -125,18 +174,22 @@ pub fn start<R: Runtime>(
 
     info!(target: "monitor", "starting monitor for target='{}'", capture_target);
 
-    let recognition =
-        Arc::new(PythonProcess::spawn_recognition(&app).map_err(MonitorError::RecognitionSpawn)?);
-    let mortal = Arc::new(
-        PythonProcess::spawn_mortal(&app, &mortal_model_path, inference_backend)
-            .map_err(MonitorError::MortalSpawn)?,
-    );
+    let recognition_proc =
+        PythonProcess::spawn_recognition(&app).map_err(MonitorError::RecognitionSpawn)?;
+    let mortal_proc = PythonProcess::spawn_mortal(&app, &mortal_model_path, inference_backend)
+        .map_err(MonitorError::MortalSpawn)?;
+
+    let recognition = Arc::new(ProcessSlot::new(recognition_proc));
+    let mortal = Arc::new(ProcessSlot::new(mortal_proc));
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_for_thread = stop_flag.clone();
     let rec_for_thread = recognition.clone();
     let mortal_for_thread = mortal.clone();
     let app_for_thread = app.clone();
+    // mortal の再起動時に同じ引数で `spawn_mortal` を呼ぶため
+    // 監視スレッドへ持ち込む。
+    let mortal_model_path_for_thread = mortal_model_path.clone();
 
     let join = std::thread::spawn(move || {
         info!(target: "monitor", "monitor loop started");
@@ -147,25 +200,31 @@ pub fn start<R: Runtime>(
         // 出せなくなる (#36 review by codex)。recognition と mortal は別プロセスなので
         // 双方のスモークだけはスレッド分割して並列化し、起動時間を短縮する。
         let rec_smoke = {
-            let p = rec_for_thread.clone();
+            let p = rec_for_thread.current();
             std::thread::spawn(move || smoke_ping(p.as_ref(), "recognition"))
         };
         let mortal_smoke = {
-            let p = mortal_for_thread.clone();
+            let p = mortal_for_thread.current();
             std::thread::spawn(move || smoke_ping(p.as_ref(), "mortal"))
         };
         let _ = rec_smoke.join();
         let _ = mortal_smoke.join();
 
+        // PRD §7.4: ProcessDied 時の自動再起動はライフタイム合計で 1 回まで。
+        // これを超えたらフロント側で `phase = error` に固定して停止操作を待つ。
+        let mut restart_tracker = RestartTracker::new();
+
         // SMOKE_PING_ID (=0) と衝突しないよう 1 から開始。
         let mut frame_id: i64 = SMOKE_PING_ID + 1;
         while !stop_for_thread.load(Ordering::SeqCst) {
             let cycle_start = Instant::now();
+            let recognition_proc = rec_for_thread.current();
+            let mortal_proc = mortal_for_thread.current();
             match run_cycle(
                 &capture_target,
                 frame_id,
-                rec_for_thread.as_ref(),
-                mortal_for_thread.as_ref(),
+                recognition_proc.as_ref(),
+                mortal_proc.as_ref(),
             ) {
                 Ok((inference, board)) => {
                     let payload = InferenceEventPayload { inference, board };
@@ -174,15 +233,16 @@ pub fn start<R: Runtime>(
                     }
                 }
                 Err(e) => {
-                    warn!(target: "monitor", "cycle failed: {}", e);
-                    let payload = RecognitionErrorPayload {
-                        kind: e.kind(),
-                        message: e.to_string(),
-                        occurred_at: Utc::now().to_rfc3339(),
-                    };
-                    if let Err(emit_err) = app_for_thread.emit("recognition-error", &payload) {
-                        warn!(target: "monitor", "emit recognition-error failed: {}", emit_err);
-                    }
+                    handle_cycle_error(
+                        &app_for_thread,
+                        &e,
+                        &rec_for_thread,
+                        &mortal_for_thread,
+                        &mortal_model_path_for_thread,
+                        inference_backend,
+                        &mut restart_tracker,
+                        &stop_for_thread,
+                    );
                 }
             }
             frame_id = frame_id.wrapping_add(1);
@@ -197,6 +257,24 @@ pub fn start<R: Runtime>(
         mortal,
         join: Some(join),
     })
+}
+
+/// `ProcessDied` 時の再起動回数を追跡する。
+/// PRD §7.4 で「Mortal 推論失敗 → 監視は継続」「認識失敗 → 次フレームへスキップ」
+/// と定められており、本実装ではライフタイム 1 回までの再起動を許容して、
+/// 失敗を超えた場合はフロント側を `phase = error` で停止させる。
+struct RestartTracker {
+    recognition_attempted: bool,
+    mortal_attempted: bool,
+}
+
+impl RestartTracker {
+    fn new() -> Self {
+        Self {
+            recognition_attempted: false,
+            mortal_attempted: false,
+        }
+    }
 }
 
 /// 1 サイクル経過後、次サイクル開始までを `SLEEP_SLICE` 刻みで待機する。
@@ -214,31 +292,108 @@ fn sleep_until_next_cycle(cycle_start: Instant, stop_flag: &AtomicBool) {
 }
 
 #[derive(Debug, Error)]
-enum CycleError {
+pub(crate) enum CycleError {
     #[error("capture target window id is empty")]
     NoTarget,
     #[error("capture failed: {0}")]
     Capture(String),
     #[error("png encode failed: {0}")]
     PngEncode(String),
+    /// recognition プロセスからの応答が `PYTHON_RECV_TIMEOUT` 内に来なかった。
+    /// PRD §7.4 「認識失敗 → スキップして次フレームへ」に該当 (warn ログ)。
+    #[error("recognition timeout")]
+    RecognitionTimeout,
+    /// recognition プロセスへの I/O が失敗した (BrokenPipe など)。
     #[error("recognition io failed: {0}")]
     RecognitionIo(PythonProcError),
+    /// recognition プロセスが死亡 (stdout EOF) した。再起動の対象。
+    #[error("recognition process died")]
+    RecognitionDied,
+    /// recognition の 1 行が JSON としてパースできない。
+    #[error("recognition parse failed: {0}")]
+    RecognitionParseFail(String),
+    /// パースは通ったがプロトコル上の必須フィールドが欠けている等。
     #[error("recognition response invalid: {0}")]
     RecognitionInvalid(String),
+    /// mortal プロセスからの応答が `PYTHON_RECV_TIMEOUT` 内に来なかった。
+    /// PRD §7.4 「Mortal 推論失敗 → エラー表示+ログ記録+監視は継続」に該当。
+    #[error("mortal timeout")]
+    MortalTimeout,
     #[error("mortal io failed: {0}")]
     MortalIo(PythonProcError),
+    /// mortal プロセスが死亡。再起動の対象。
+    #[error("mortal process died")]
+    MortalDied,
+    #[error("mortal parse failed: {0}")]
+    MortalParseFail(String),
     #[error("mortal response invalid: {0}")]
     MortalInvalid(String),
 }
 
 impl CycleError {
     /// フロント側 `AppError.type` (src/types/index.ts) と整合する分類を返す。
-    fn kind(&self) -> &'static str {
+    /// timeout / parse fail / process died も全て元のステージ
+    /// (recognition or inference) に集約して、UI での表示を一貫させる。
+    pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::NoTarget | Self::Capture(_) | Self::PngEncode(_) => "capture",
-            Self::RecognitionIo(_) | Self::RecognitionInvalid(_) => "recognition",
-            Self::MortalIo(_) | Self::MortalInvalid(_) => "inference",
+            Self::RecognitionTimeout
+            | Self::RecognitionIo(_)
+            | Self::RecognitionDied
+            | Self::RecognitionParseFail(_)
+            | Self::RecognitionInvalid(_) => "recognition",
+            Self::MortalTimeout
+            | Self::MortalIo(_)
+            | Self::MortalDied
+            | Self::MortalParseFail(_)
+            | Self::MortalInvalid(_) => "inference",
         }
+    }
+
+    /// このエラーが「プロセス死亡」起因なら、どのプロセスかを返す。
+    /// 監視ループはこれを使って 1 度だけ再起動を試みる (PRD §7.4)。
+    pub(crate) fn dead_process(&self) -> Option<DeadProcess> {
+        match self {
+            Self::RecognitionDied => Some(DeadProcess::Recognition),
+            Self::MortalDied => Some(DeadProcess::Mortal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeadProcess {
+    Recognition,
+    Mortal,
+}
+
+/// PythonProcError を recognition 側の CycleError 派生にマッピングする。
+fn map_recognition_error(e: PythonProcError) -> CycleError {
+    match e {
+        PythonProcError::Timeout(_) => CycleError::RecognitionTimeout,
+        PythonProcError::Terminated => CycleError::RecognitionDied,
+        // BrokenPipe など stdin 書き込みエラーは「もう死んでいる」事象として扱う。
+        // 子が死んだ瞬間は `Terminated` か `SpawnFailed(BrokenPipe)` のどちらが
+        // 起きるか OS / タイミング依存なので、両方を ProcessDied 扱いに寄せる。
+        PythonProcError::SpawnFailed(io_err)
+            if io_err.kind() == std::io::ErrorKind::BrokenPipe =>
+        {
+            CycleError::RecognitionDied
+        }
+        other => CycleError::RecognitionIo(other),
+    }
+}
+
+fn map_mortal_error(e: PythonProcError) -> CycleError {
+    match e {
+        PythonProcError::Timeout(_) => CycleError::MortalTimeout,
+        PythonProcError::Terminated => CycleError::MortalDied,
+        PythonProcError::SpawnFailed(io_err)
+            if io_err.kind() == std::io::ErrorKind::BrokenPipe =>
+        {
+            CycleError::MortalDied
+        }
+        other => CycleError::MortalIo(other),
     }
 }
 
@@ -265,10 +420,10 @@ fn run_cycle(
         "image_b64": image_b64,
     });
     let rec_line = recognition
-        .request_line(&frame_req.to_string())
-        .map_err(CycleError::RecognitionIo)?;
+        .request_line_timeout(&frame_req.to_string(), PYTHON_RECV_TIMEOUT)
+        .map_err(map_recognition_error)?;
     let rec_parsed: serde_json::Value = serde_json::from_str(rec_line.trim())
-        .map_err(|e| CycleError::RecognitionInvalid(format!("json: {}", e)))?;
+        .map_err(|e| CycleError::RecognitionParseFail(format!("json: {}", e)))?;
     if rec_parsed.get("type").and_then(|v| v.as_str()) != Some("result") {
         return Err(CycleError::RecognitionInvalid(format!(
             "unexpected type: {}",
@@ -302,10 +457,10 @@ fn run_cycle(
         "tenhou_json": tenhou_json,
     });
     let infer_line = mortal
-        .request_line(&infer_req.to_string())
-        .map_err(CycleError::MortalIo)?;
+        .request_line_timeout(&infer_req.to_string(), PYTHON_RECV_TIMEOUT)
+        .map_err(map_mortal_error)?;
     let infer_parsed: serde_json::Value = serde_json::from_str(infer_line.trim())
-        .map_err(|e| CycleError::MortalInvalid(format!("json: {}", e)))?;
+        .map_err(|e| CycleError::MortalParseFail(format!("json: {}", e)))?;
     if infer_parsed.get("type").and_then(|v| v.as_str()) != Some("result") {
         return Err(CycleError::MortalInvalid(format!(
             "unexpected type: {}",
@@ -357,6 +512,100 @@ fn run_cycle(
     };
 
     Ok((inference, board))
+}
+
+/// run_cycle で発生したエラーを処理する:
+/// 1. ログ + recognition-error イベント emit (UI を error phase に遷移させる)
+/// 2. SQLite `error_log` に INSERT (TODO: E3 で実装)
+/// 3. ProcessDied なら 1 度だけ Python プロセスの再起動を試みる
+#[allow(clippy::too_many_arguments)]
+fn handle_cycle_error<R: Runtime>(
+    app: &AppHandle<R>,
+    err: &CycleError,
+    rec_slot: &Arc<ProcessSlot>,
+    mortal_slot: &Arc<ProcessSlot>,
+    mortal_model_path: &str,
+    inference_backend: InferenceBackend,
+    restart_tracker: &mut RestartTracker,
+    stop_flag: &AtomicBool,
+) {
+    warn!(target: "monitor", "cycle failed: {}", err);
+
+    let payload = RecognitionErrorPayload {
+        kind: err.kind(),
+        message: err.to_string(),
+        occurred_at: Utc::now().to_rfc3339(),
+    };
+    if let Err(emit_err) = app.emit("recognition-error", &payload) {
+        warn!(target: "monitor", "emit recognition-error failed: {}", emit_err);
+    }
+
+    // TODO(E3): error_log テーブルへ INSERT する。
+    // 現状 tauri-plugin-sql が Rust から直接 INSERT する API を持たないため、
+    // E3 で sqlx などの直接接続を導入してから差し込む。
+    // INSERT INTO error_log (timestamp, error_type, message, stack_trace, related_game_state)
+    //   VALUES (now, payload.kind, payload.message, NULL, NULL)
+    let _ = (&payload.kind, &payload.message);
+
+    // ProcessDied なら 1 度だけ自動再起動を試みる。
+    let Some(dead) = err.dead_process() else {
+        return;
+    };
+    // 監視停止中 (MonitorHandle::stop が kill 後に呼んだケース) で再起動すると、
+    // 直後に Drop で再 kill するだけの無駄なプロセスを生むので何もしない。
+    if stop_flag.load(Ordering::SeqCst) {
+        return;
+    }
+    let already_attempted = match dead {
+        DeadProcess::Recognition => restart_tracker.recognition_attempted,
+        DeadProcess::Mortal => restart_tracker.mortal_attempted,
+    };
+    if already_attempted {
+        warn!(
+            target: "monitor",
+            "{:?} died again after restart; giving up (UI stays in error phase)",
+            dead
+        );
+        return;
+    }
+    match dead {
+        DeadProcess::Recognition => restart_tracker.recognition_attempted = true,
+        DeadProcess::Mortal => restart_tracker.mortal_attempted = true,
+    }
+
+    info!(target: "monitor", "attempting one-shot restart of {:?}", dead);
+    let spawn_result = match dead {
+        DeadProcess::Recognition => PythonProcess::spawn_recognition(app),
+        DeadProcess::Mortal => PythonProcess::spawn_mortal(app, mortal_model_path, inference_backend),
+    };
+    match spawn_result {
+        Ok(new_proc) => {
+            match dead {
+                DeadProcess::Recognition => rec_slot.replace(new_proc),
+                DeadProcess::Mortal => mortal_slot.replace(new_proc),
+            }
+            info!(target: "monitor", "{:?} restarted", dead);
+        }
+        Err(spawn_err) => {
+            warn!(
+                target: "monitor",
+                "{:?} restart failed: {}; UI will remain in error phase",
+                dead, spawn_err
+            );
+            // 再起動自体に失敗した場合も UI へ通知して error phase を維持する。
+            let payload = RecognitionErrorPayload {
+                kind: match dead {
+                    DeadProcess::Recognition => "recognition",
+                    DeadProcess::Mortal => "inference",
+                },
+                message: format!("restart failed: {}", spawn_err),
+                occurred_at: Utc::now().to_rfc3339(),
+            };
+            if let Err(emit_err) = app.emit("recognition-error", &payload) {
+                warn!(target: "monitor", "emit recognition-error failed: {}", emit_err);
+            }
+        }
+    }
 }
 
 /// 推奨候補から UI のプライマリ表示文を組み立てる。
@@ -447,7 +696,10 @@ fn self_wind_index(self_wind: &str) -> Option<usize> {
 /// `request_line` の roundtrip ロックを握っても誰も待っていない。応答が無く
 /// 詰まった場合でも stop() の kill() が `recv_line` を解錠して戻ってくる。
 fn smoke_ping(proc: &PythonProcess, label: &'static str) {
-    let resp = match proc.request_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID)) {
+    let resp = match proc.request_line_timeout(
+        &format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID),
+        SMOKE_RECV_TIMEOUT,
+    ) {
         Ok(s) => s,
         Err(e) => {
             warn!(target: "monitor", "smoke ping/pong [{}] failed: {}", label, e);
@@ -490,5 +742,89 @@ fn validate_pong(line: &str) -> Result<(), String> {
             SMOKE_PING_ID, other
         )),
         None => Err("missing or non-integer 'id' field".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cycle_error_kinds_map_to_app_error_types() {
+        // capture 系は全て "capture"
+        assert_eq!(CycleError::NoTarget.kind(), "capture");
+        assert_eq!(CycleError::Capture("x".into()).kind(), "capture");
+        assert_eq!(CycleError::PngEncode("x".into()).kind(), "capture");
+
+        // recognition 系 (timeout / parse fail / died) は全て "recognition"
+        assert_eq!(CycleError::RecognitionTimeout.kind(), "recognition");
+        assert_eq!(CycleError::RecognitionDied.kind(), "recognition");
+        assert_eq!(
+            CycleError::RecognitionParseFail("x".into()).kind(),
+            "recognition"
+        );
+        assert_eq!(
+            CycleError::RecognitionInvalid("x".into()).kind(),
+            "recognition"
+        );
+
+        // mortal 系は全て "inference" (フロント側 AppError.type の語彙)
+        assert_eq!(CycleError::MortalTimeout.kind(), "inference");
+        assert_eq!(CycleError::MortalDied.kind(), "inference");
+        assert_eq!(
+            CycleError::MortalParseFail("x".into()).kind(),
+            "inference"
+        );
+        assert_eq!(CycleError::MortalInvalid("x".into()).kind(), "inference");
+    }
+
+    #[test]
+    fn dead_process_only_set_for_died_variants() {
+        assert_eq!(
+            CycleError::RecognitionDied.dead_process(),
+            Some(DeadProcess::Recognition)
+        );
+        assert_eq!(
+            CycleError::MortalDied.dead_process(),
+            Some(DeadProcess::Mortal)
+        );
+        assert!(CycleError::RecognitionTimeout.dead_process().is_none());
+        assert!(CycleError::MortalTimeout.dead_process().is_none());
+        assert!(CycleError::RecognitionParseFail("x".into())
+            .dead_process()
+            .is_none());
+    }
+
+    #[test]
+    fn map_recognition_error_classifies_timeout_died_io() {
+        let timeout = map_recognition_error(PythonProcError::Timeout(Duration::from_secs(1)));
+        assert!(matches!(timeout, CycleError::RecognitionTimeout));
+
+        let died = map_recognition_error(PythonProcError::Terminated);
+        assert!(matches!(died, CycleError::RecognitionDied));
+
+        let broken_pipe = map_recognition_error(PythonProcError::SpawnFailed(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"),
+        ));
+        assert!(matches!(broken_pipe, CycleError::RecognitionDied));
+
+        let other = map_recognition_error(PythonProcError::SpawnFailed(std::io::Error::other(
+            "boom",
+        )));
+        assert!(matches!(other, CycleError::RecognitionIo(_)));
+    }
+
+    #[test]
+    fn map_mortal_error_classifies_timeout_died_io() {
+        let timeout = map_mortal_error(PythonProcError::Timeout(Duration::from_secs(1)));
+        assert!(matches!(timeout, CycleError::MortalTimeout));
+
+        let died = map_mortal_error(PythonProcError::Terminated);
+        assert!(matches!(died, CycleError::MortalDied));
+
+        let broken_pipe = map_mortal_error(PythonProcError::SpawnFailed(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"),
+        ));
+        assert!(matches!(broken_pipe, CycleError::MortalDied));
     }
 }

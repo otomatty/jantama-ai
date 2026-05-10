@@ -7,7 +7,10 @@ use crate::types::InferenceBackend;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
+use std::time::Duration;
 // `Manager` は release ビルドでだけ `app.path()` を解決するために必要。
 // debug ビルドでは未使用となるため条件付きで取り込む。
 #[cfg(not(debug_assertions))]
@@ -24,14 +27,32 @@ pub enum PythonProcError {
     SpawnFailed(#[from] std::io::Error),
     #[error("プロセスが終了しています")]
     Terminated,
+    #[error("応答がタイムアウトしました ({}ms)", .0.as_millis())]
+    Timeout(Duration),
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// バックグラウンド reader スレッドが受け取った 1 イベント。
+///
+/// Python プロセスの stdout は 1 行ずつ JSON が流れてくる前提で、
+/// `read_line` の戻り値ごとに `Line` / `Eof` / `Io` の 3 種に分類して
+/// チャネルへ流す。受信側 (`recv_line_timeout`) はチャネルに何が
+/// 入っているかで「正常応答 / プロセス死亡 / I/O 障害」を区別できる。
+enum ReaderEvent {
+    Line(String),
+    Eof,
+    Io(std::io::Error),
 }
 
 pub struct PythonProcess {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
-    stdout: Mutex<BufReader<ChildStdout>>,
+    /// stdout を読む専用スレッドが流すイベントの受け口。
+    /// `recv_line` 系で取り出す。
+    rx: Mutex<Receiver<ReaderEvent>>,
+    /// reader スレッドのハンドル。`kill` 時に join するため保持する。
+    reader_join: Mutex<Option<JoinHandle<()>>>,
     /// 送信→受信を 1 つのトランザクションとして直列化するためのロック。
     /// stdin / stdout のロックは個別なので、複数スレッドが
     /// `send_line` → `recv_line` を呼ぶと別スレッドの応答を
@@ -86,24 +107,72 @@ impl PythonProcess {
             .take()
             .ok_or_else(|| PythonProcError::NotFound("stdout".into()))?;
 
+        let (tx, rx) = mpsc::channel::<ReaderEvent>();
+        let label_for_thread = label.clone();
+        let reader_join = std::thread::spawn(move || {
+            reader_loop(stdout, tx, label_for_thread);
+        });
+
         Ok(Self {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
-            stdout: Mutex::new(BufReader::new(stdout)),
+            rx: Mutex::new(rx),
+            reader_join: Mutex::new(Some(reader_join)),
             roundtrip: Mutex::new(()),
             label,
         })
     }
 
-    /// 1 行送って 1 行受け取る同期トランザクション。
-    ///
-    /// 複数スレッドからこのメソッドを呼んでも、`roundtrip` ロックで
-    /// 直列化されるので応答の取り違えは発生しない。スモークと監視ループの
-    /// ように同一プロセスへ並行アクセスするコードはこちらを使う。
+    /// 1 行送って 1 行受け取る同期トランザクション (タイムアウト無し)。
+    /// 互換性のために残してあるが、本番フローでは
+    /// [`request_line_timeout`] を使うことで Python が無応答になっても
+    /// 監視ループが止まらないようにする。
     pub fn request_line(&self, line: &str) -> Result<String, PythonProcError> {
         let _guard = self.roundtrip.lock().unwrap();
         self.send_line(line)?;
         self.recv_line()
+    }
+
+    /// タイムアウト付きの送信→受信。
+    ///
+    /// `timeout` を超えても応答が来なければ [`PythonProcError::Timeout`]
+    /// を返す。応答が遅れている = 認識/推論が詰まっているケースの
+    /// バックストップで、PRD §7.4「Mortal 推論失敗」「認識失敗」に対応。
+    ///
+    /// 直前の `request_line_timeout` がタイムアウトで戻った場合、Python 側は
+    /// その応答を後から書き出してくる可能性がある。次の往復ではその応答が
+    /// 本来欲しい応答より先にチャネルへ届き、`id` ミスマッチで永遠に
+    /// 1 サイクルずれた応答を読み続ける羽目になるので、送信前にチャネルへ
+    /// 溜まった「古い応答」を drain しておく。
+    pub fn request_line_timeout(
+        &self,
+        line: &str,
+        timeout: Duration,
+    ) -> Result<String, PythonProcError> {
+        let _guard = self.roundtrip.lock().unwrap();
+        self.drain_pending();
+        self.send_line(line)?;
+        self.recv_line_timeout(timeout)
+    }
+
+    /// チャネルに溜まっている未読イベントを破棄する。
+    /// `roundtrip` ロック保持中に呼ばれる前提で、reader スレッドが
+    /// 直前のタイムアウト応答を流し終えていればここでまとめて捨てる。
+    fn drain_pending(&self) {
+        let rx = self.rx.lock().unwrap();
+        loop {
+            match rx.try_recv() {
+                Ok(ReaderEvent::Line(s)) => {
+                    debug!(target: "python_proc", "[{}] drop stale: {}", self.label, s.trim());
+                }
+                Ok(ReaderEvent::Eof) | Ok(ReaderEvent::Io(_)) => {
+                    // reader が既に死んでいる場合はその痕跡を捨ててよい。
+                    // 次の send_line / recv_line_timeout で改めて
+                    // Terminated を返すことになる。
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     /// 1 行 JSON を送信する (末尾 \n を自動付与)。
@@ -118,16 +187,40 @@ impl PythonProcess {
         Ok(())
     }
 
-    /// 1 行 JSON を受信する。
+    /// 1 行 JSON を受信する (タイムアウト無し、ブロッキング)。
+    /// プロセスが死んでチャネルが切断された場合は
+    /// [`PythonProcError::Terminated`] を返す。
     pub fn recv_line(&self) -> Result<String, PythonProcError> {
-        let mut stdout = self.stdout.lock().unwrap();
-        let mut buf = String::new();
-        let n = stdout.read_line(&mut buf)?;
-        if n == 0 {
-            return Err(PythonProcError::Terminated);
+        let rx = self.rx.lock().unwrap();
+        match rx.recv() {
+            Ok(ReaderEvent::Line(s)) => {
+                debug!(target: "python_proc", "[{}] <- {}", self.label, s.trim());
+                Ok(s)
+            }
+            Ok(ReaderEvent::Eof) => Err(PythonProcError::Terminated),
+            Ok(ReaderEvent::Io(e)) => Err(PythonProcError::SpawnFailed(e)),
+            Err(_) => Err(PythonProcError::Terminated),
         }
-        debug!(target: "python_proc", "[{}] <- {}", self.label, buf.trim());
-        Ok(buf)
+    }
+
+    /// タイムアウト付きで 1 行 JSON を受信する。
+    ///
+    /// - 応答到達: `Ok(line)`
+    /// - `timeout` 経過: [`PythonProcError::Timeout`]
+    /// - プロセス死亡 (stdout が EOF / チャネル切断): [`PythonProcError::Terminated`]
+    /// - reader 側 I/O 失敗: [`PythonProcError::SpawnFailed`] (io::Error)
+    pub fn recv_line_timeout(&self, timeout: Duration) -> Result<String, PythonProcError> {
+        let rx = self.rx.lock().unwrap();
+        match rx.recv_timeout(timeout) {
+            Ok(ReaderEvent::Line(s)) => {
+                debug!(target: "python_proc", "[{}] <- {}", self.label, s.trim());
+                Ok(s)
+            }
+            Ok(ReaderEvent::Eof) => Err(PythonProcError::Terminated),
+            Ok(ReaderEvent::Io(e)) => Err(PythonProcError::SpawnFailed(e)),
+            Err(RecvTimeoutError::Timeout) => Err(PythonProcError::Timeout(timeout)),
+            Err(RecvTimeoutError::Disconnected) => Err(PythonProcError::Terminated),
+        }
     }
 
     /// プロセスを終了させる。Drop 時にも呼ばれるため二重 kill 安全。
@@ -137,6 +230,13 @@ impl PythonProcess {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        // child が落ちると stdout が EOF になり reader_loop が抜けるので、
+        // ここで join して reader スレッドのリークを防ぐ。
+        if let Ok(mut join_opt) = self.reader_join.lock() {
+            if let Some(join) = join_opt.take() {
+                let _ = join.join();
+            }
         }
     }
 
@@ -174,6 +274,38 @@ impl PythonProcess {
         let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
         Self::spawn("mortal", &cmd.program, &arg_refs, cmd.cwd.as_deref())
     }
+}
+
+/// stdout を 1 行ずつ読み、`tx` へイベントとして流す reader スレッド本体。
+/// プロセスが死ぬと `read_line` が 0 を返すので `Eof` を送って終了する。
+fn reader_loop(
+    stdout: ChildStdout,
+    tx: mpsc::Sender<ReaderEvent>,
+    label: String,
+) {
+    let mut reader = BufReader::new(stdout);
+    loop {
+        let mut buf = String::new();
+        match reader.read_line(&mut buf) {
+            Ok(0) => {
+                // 受信側が既にチャネルを drop している場合 (＝PythonProcess
+                // が破棄された) は send が失敗するが、そのまま終了して問題ない。
+                let _ = tx.send(ReaderEvent::Eof);
+                break;
+            }
+            Ok(_) => {
+                if tx.send(ReaderEvent::Line(buf)).is_err() {
+                    // 受信側が消えていればこれ以上読む意味は無い。
+                    break;
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(ReaderEvent::Io(e));
+                break;
+            }
+        }
+    }
+    debug!(target: "python_proc", "[{}] reader thread exited", label);
 }
 
 /// `resolve_python_command` の結果。dev では `uv` を `python/` で起動し、
@@ -360,5 +492,86 @@ mod tests {
     fn find_uv_returns_not_found_when_path_is_empty() {
         let result = find_uv_executable_in(Some(OsStr::new("")));
         assert!(matches!(result, Err(PythonProcError::NotFound(_))));
+    }
+
+    /// 即時応答する Python ワンライナーで、`request_line_timeout` が
+    /// 設定したタイムアウト内に応答を取得できることを確認する。
+    #[test]
+    fn request_line_timeout_returns_response() {
+        let Some(python) = which::which("python3").ok().or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+        let proc = PythonProcess::spawn(
+            "echo",
+            &python,
+            &[
+                "-u",
+                "-c",
+                "import sys\nfor line in sys.stdin:\n    sys.stdout.write(line)\n    sys.stdout.flush()\n",
+            ],
+            None,
+        )
+        .expect("spawn echo python");
+
+        let resp = proc
+            .request_line_timeout("hello\n", Duration::from_secs(5))
+            .expect("response within timeout");
+        assert_eq!(resp.trim(), "hello");
+    }
+
+    /// 応答を返さない Python に対して `request_line_timeout` が
+    /// `Timeout` を返すことを確認する。
+    #[test]
+    fn request_line_timeout_fires_when_python_silent() {
+        let Some(python) = which::which("python3").ok().or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+        let proc = PythonProcess::spawn(
+            "silent",
+            &python,
+            &[
+                "-u",
+                "-c",
+                // stdin から行を読みつつも何も書き返さない。stdin が閉じるまで
+                // ぶら下がるので親側のタイムアウトを試せる。
+                "import sys, time\nfor _ in sys.stdin:\n    time.sleep(60)\n",
+            ],
+            None,
+        )
+        .expect("spawn silent python");
+
+        let result = proc.request_line_timeout("ping\n", Duration::from_millis(300));
+        assert!(matches!(result, Err(PythonProcError::Timeout(_))), "got {:?}", result);
+    }
+
+    /// 即終了する Python を相手に `request_line_timeout` が
+    /// `Terminated` を返すことを確認する。
+    #[test]
+    fn request_line_timeout_returns_terminated_on_dead_process() {
+        let Some(python) = which::which("python3").ok().or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+        let proc = PythonProcess::spawn(
+            "dies",
+            &python,
+            &["-u", "-c", "import sys; sys.exit(0)"],
+            None,
+        )
+        .expect("spawn dying python");
+
+        // 子プロセスが終了して reader_loop が EOF を流すまで少し待つ
+        std::thread::sleep(Duration::from_millis(200));
+        let result = proc.request_line_timeout("anything\n", Duration::from_secs(2));
+        assert!(
+            matches!(result, Err(PythonProcError::Terminated) | Err(PythonProcError::SpawnFailed(_))),
+            "got {:?}",
+            result
+        );
     }
 }
