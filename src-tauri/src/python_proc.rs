@@ -7,7 +7,7 @@ use crate::types::InferenceBackend;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri::{AppHandle, Runtime};
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Debug, Error)]
 pub enum PythonProcError {
@@ -49,12 +49,16 @@ enum ReaderEvent {
 ///
 /// 元実装は `read_line` を consumer スレッドが直接呼んでいたため、OS の pipe
 /// バッファ (Linux で 64KiB 程度) が天井として働いていた。バックグラウンド
-/// reader + 無制限 mpsc に切り替えると、Python が暴走して 1Hz 以上の速度で
-/// stdout に書き続けた場合キューが青天井に伸びてアプリが OOM する可能性が
-/// ある (Codex の指摘)。`sync_channel` で上限を設け、超過分は `try_send` で
-/// 落とすことで pipe バッファ相当の自然なバックプレッシャを取り戻す。
-/// 落とした応答は protocol 層 (`drain_pending` + `id` ミスマッチ) で再同期
-/// できる前提。
+/// reader + 無制限 mpsc に切り替えると、Python が暴走して stdout に書き続けた
+/// 場合キューが青天井に伸びてアプリが OOM する可能性がある (Codex P2)。
+/// `sync_channel` で上限を設け、reader はブロッキング `send` を使う:
+///
+///   - 通常運用: 1 リクエスト = 1 レスポンスなのでキューは常にほぼ空
+///   - 暴走時: reader が send で詰まる → 64 個目以降は pipe に残る → Python の
+///     write が pipe バッファ満杯でブロック (= 元の OS 由来のバックプレッシャ)
+///
+/// try_send + drop で溢れを捨てる方式は、待っている応答そのものが drop されると
+/// 偽タイムアウトを誘発する (Codex P1) ので採らない。
 const READER_QUEUE_BOUND: usize = 64;
 
 pub struct PythonProcess {
@@ -283,6 +287,17 @@ impl PythonProcess {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // reader はブロッキング `send` を使うので、consumer がキューを引かない
+        // まま child を kill するだけだと、send で詰まったまま join が永久に
+        // 戻らない。受信側を切り替えて元の Receiver を drop し、reader 側の
+        // send を Err(Disconnected) で起こすことで shutdown を進める。
+        // 切り替え後の rx (空 + tx 無し) は recv で即 Disconnected を返し、
+        // 上位で `Terminated` にマップされる (= プロセス死亡時の正規挙動)。
+        if let Ok(mut rx_guard) = self.rx.lock() {
+            let (_dead_tx, dead_rx) = mpsc::sync_channel::<ReaderEvent>(1);
+            drop(_dead_tx);
+            *rx_guard = dead_rx;
+        }
         // child が落ちると stdout が EOF になり reader_loop が抜けるので、
         // ここで join して reader スレッドのリークを防ぐ。
         if let Ok(mut join_opt) = self.reader_join.lock() {
@@ -331,11 +346,13 @@ impl PythonProcess {
 /// stdout を 1 行ずつ読み、`tx` へイベントとして流す reader スレッド本体。
 /// プロセスが死ぬと `read_line` が 0 を返すので `Eof` を送って終了する。
 ///
-/// `try_send` を使う理由: ブロッキング `send` だと consumer が遅れたときに
-/// reader が send で詰まり、`kill()` 経路で reader を join できなくなる
-/// (consumer は roundtrip lock を握ったまま外部要因で待たされている可能性
-/// がある)。`try_send` で溢れた行は `drain_pending` 相当の扱いとして捨て、
-/// pipe バッファ → reader → 上限付きキューの順でバックプレッシャを掛ける。
+/// ブロッキング `send` を使う: try_send で溢れを捨てると、求めている応答自体が
+/// (consumer が一時的に遅れたタイミングで) drop されて偽タイムアウト → 不要な
+/// 自動再起動を誘発する可能性がある (Codex P1 on PR #40)。bounded sync_channel
+/// で send が満杯になれば reader が pipe を読まなくなり、Python 側の write が
+/// pipe バッファ満杯でブロックする = 元の OS pipe ベースの自然な
+/// バックプレッシャに戻る。`kill()` 側は rx を差し替えて Disconnected を発火させ、
+/// 詰まった send を解放してから join するので shutdown の deadlock は起きない。
 fn reader_loop(stdout: ChildStdout, tx: mpsc::SyncSender<ReaderEvent>, label: String) {
     let mut reader = BufReader::new(stdout);
     loop {
@@ -345,29 +362,11 @@ fn reader_loop(stdout: ChildStdout, tx: mpsc::SyncSender<ReaderEvent>, label: St
             Ok(_) => ReaderEvent::Line(buf),
             Err(e) => ReaderEvent::Io(e),
         };
-        // 終端イベント (Eof / Io) を送り終えた / 試みた直後はループを抜ける。
         let is_terminal = matches!(event, ReaderEvent::Eof | ReaderEvent::Io(_));
-        match tx.try_send(event) {
-            Ok(()) => {}
-            Err(TrySendError::Full(dropped)) => {
-                // consumer が `READER_QUEUE_BOUND` フレーム以上遅れている。
-                // 古い行は protocol 層から見ても stale なので、ここで捨てる
-                // ことでメモリ青天井化を防ぐ (drain_pending + id ミスマッチが
-                // 受信側で再同期する前提)。
-                if let ReaderEvent::Line(s) = dropped {
-                    warn!(
-                        target: "python_proc",
-                        "[{}] reader queue full (>{}); dropping stale line: {}",
-                        label,
-                        READER_QUEUE_BOUND,
-                        s.trim()
-                    );
-                }
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                // 受信側が消えていればこれ以上読む意味は無い。
-                break;
-            }
+        // send は consumer が空きを作るまでブロックする。受信側が drop されて
+        // いれば Err(SendError) で抜ける (= shutdown 経路)。
+        if tx.send(event).is_err() {
+            break;
         }
         if is_terminal {
             break;
@@ -658,6 +657,47 @@ mod tests {
             })
             .expect("got fresh response");
         assert_eq!(resp.trim(), "fresh");
+    }
+
+    /// reader がブロッキング send で詰まっている状態でも `kill()` が
+    /// deadlock せずに戻ることを確認する。Codex P1 (PR #40) で try_send +
+    /// drop から blocking send + kill 時 rx 差し替えに切り替えた挙動の
+    /// リグレッションテスト。
+    #[test]
+    fn kill_returns_when_reader_is_blocked_on_send() {
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+        // READER_QUEUE_BOUND を大きく超える行数を一気に書いて、reader を
+        // blocking send で詰まらせる。consumer が引かないので channel は満杯。
+        let burst = READER_QUEUE_BOUND * 4;
+        let script = format!(
+            "import sys\n\
+             for i in range({}):\n    \
+                 sys.stdout.write(f'line-{{i}}\\n')\n\
+             sys.stdout.flush()\n\
+             # stdin が閉じるまでぶら下がる (kill 経由で stdout が閉じる契機を作る)\n\
+             sys.stdin.read()\n",
+            burst
+        );
+        let proc = PythonProcess::spawn("burst", &python, &["-u", "-c", &script], None)
+            .expect("spawn burst python");
+
+        // Python が書き終わって reader が send で詰まるまで待つ。
+        std::thread::sleep(Duration::from_millis(300));
+
+        let started = Instant::now();
+        proc.kill();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "kill() should not deadlock; took {:?}",
+            elapsed
+        );
     }
 
     /// 即終了する Python を相手に `request_line_timeout` が
