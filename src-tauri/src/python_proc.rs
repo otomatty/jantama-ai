@@ -189,74 +189,14 @@ pub struct ResolvedCommand {
 ///   `uv run jantama-<label>` を `python/` ディレクトリで起動するための
 ///   コマンドを返す。`uv` が見つからない場合は `NotFound` を返す。
 /// - release: tauri リソースディレクトリに同梱された
-///   `jantama-<label>(.exe)` をまず試し、見つからない場合 (Phase F が
-///   未完了で `bundle.resources` に未同梱、など) は dev と同じ
-///   `uv run` 経路にフォールバックする。両方失敗した場合のみ `NotFound`。
+///   `jantama-<label>(.exe)` のパスを返す。同梱が無い場合は `NotFound`
+///   を返し、Phase F (バンドル) が未完了であることを示すメッセージを
+///   付ける (フォールバックはしない: release == 同梱 exe の契約を維持)。
 #[cfg(debug_assertions)]
 pub fn resolve_python_command<R: Runtime>(
     _app: &AppHandle<R>,
     label: &str,
 ) -> Result<ResolvedCommand, PythonProcError> {
-    resolve_via_uv(label)
-}
-
-#[cfg(not(debug_assertions))]
-pub fn resolve_python_command<R: Runtime>(
-    app: &AppHandle<R>,
-    label: &str,
-) -> Result<ResolvedCommand, PythonProcError> {
-    // Phase F (バンドル) で `jantama-<label>(.exe)` を同梱する想定。
-    // Unix 系ではリソース同梱時に実行ビットが落ちると "Permission denied"
-    // になるため、Phase F のバンドル手順で実行ビットを保つ (もしくは
-    // Tauri Sidecar に切り替える) こと。
-    match resolve_bundled_exe(app, label) {
-        Ok(cmd) => Ok(cmd),
-        Err(bundled_err) => {
-            // Phase F が未完了で同梱 exe が無いリリースビルドでも、
-            // 開発機の `python/` + `uv` が揃っていれば動かす。
-            resolve_via_uv(label).map_err(|uv_err| {
-                PythonProcError::NotFound(format!(
-                    "release: バンドル exe 未検出 ({}) かつ uv フォールバックも失敗 ({})",
-                    bundled_err, uv_err
-                ))
-            })
-        }
-    }
-}
-
-/// release ビルドでリソースディレクトリ配下の同梱 exe を解決する。
-/// 存在しなければ `NotFound` を返す (呼び出し側で uv フォールバックする)。
-#[cfg(not(debug_assertions))]
-fn resolve_bundled_exe<R: Runtime>(
-    app: &AppHandle<R>,
-    label: &str,
-) -> Result<ResolvedCommand, PythonProcError> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|e| PythonProcError::NotFound(format!("resource_dir: {}", e)))?;
-    let exe_name = if cfg!(windows) {
-        format!("jantama-{}.exe", label)
-    } else {
-        format!("jantama-{}", label)
-    };
-    let exe_path = resource_dir.join(&exe_name);
-    if !exe_path.is_file() {
-        return Err(PythonProcError::NotFound(format!(
-            "{} が同梱されていません",
-            exe_path.display()
-        )));
-    }
-    Ok(ResolvedCommand {
-        program: exe_path,
-        args: Vec::new(),
-        cwd: None,
-    })
-}
-
-/// `uv run jantama-<label>` で起動するためのコマンドを組み立てる。
-/// dev では既定の経路、release では同梱 exe が無い場合のフォールバック。
-fn resolve_via_uv(label: &str) -> Result<ResolvedCommand, PythonProcError> {
     let uv = find_uv_executable()?;
     let cwd = resolve_python_project_dir().ok_or_else(|| {
         PythonProcError::NotFound(
@@ -271,11 +211,47 @@ fn resolve_via_uv(label: &str) -> Result<ResolvedCommand, PythonProcError> {
     })
 }
 
+#[cfg(not(debug_assertions))]
+pub fn resolve_python_command<R: Runtime>(
+    app: &AppHandle<R>,
+    label: &str,
+) -> Result<ResolvedCommand, PythonProcError> {
+    // Phase F (バンドル) で `jantama-<label>(.exe)` を同梱する想定。
+    // Unix 系ではリソース同梱時に実行ビットが落ちると "Permission denied"
+    // になるため、Phase F のバンドル手順で実行ビットを保つ (もしくは
+    // Tauri Sidecar に切り替える) こと。
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| PythonProcError::NotFound(format!("resource_dir: {}", e)))?;
+    let exe_name = if cfg!(windows) {
+        format!("jantama-{}.exe", label)
+    } else {
+        format!("jantama-{}", label)
+    };
+    let exe_path = resource_dir.join(&exe_name);
+    // 事前に存在確認しないと、起動時は OS の汎用 ENOENT エラーになり
+    // 「Phase F のバンドル待ち」だと気付きにくい。明示的に NotFound を返す。
+    if !exe_path.is_file() {
+        return Err(PythonProcError::NotFound(format!(
+            "{} が同梱されていません (Phase F のバンドルが未完了の可能性)",
+            exe_path.display()
+        )));
+    }
+    Ok(ResolvedCommand {
+        program: exe_path,
+        args: Vec::new(),
+        cwd: None,
+    })
+}
+
 /// PATH から `uv` 実行ファイルを探す。
 /// `which` クレートに委譲することで OS のプロセス起動と同じ
 /// ルックアップ規則 (Unix の実行ビット、Windows の PATHEXT による
 /// `uv.exe` / `uv.cmd` 等) に従う。手書きの PATH 走査では非実行ファイル
 /// を拾ったり Windows のラッパー (`.cmd`) を見落とす可能性があるため。
+/// dev ビルド (および `cargo test`) でのみ呼び出される。
+#[cfg(debug_assertions)]
 fn find_uv_executable() -> Result<PathBuf, PythonProcError> {
     which::which("uv").map_err(|e| {
         PythonProcError::NotFound(format!(
@@ -285,11 +261,11 @@ fn find_uv_executable() -> Result<PathBuf, PythonProcError> {
     })
 }
 
-/// `python/pyproject.toml` がある場所を解決する。
-/// dev (`cargo tauri dev`) ではバイナリが `src-tauri/target/debug/` に
-/// 生成されるため、cwd か exe からの上位ディレクトリ走査で `python/`
-/// を探す。release で uv フォールバック経路に入った時にも同じ手順で
-/// 探索する (見つからなければ呼び出し側がエラーを返す)。
+/// 開発時に `python/pyproject.toml` がある場所を解決する。
+/// `cargo tauri dev` ではバイナリが `src-tauri/target/debug/` に生成されるため、
+/// cwd か exe からの上位ディレクトリ走査で `python/` を探す。
+/// dev ビルド (および `cargo test`) でのみ呼び出される。
+#[cfg(debug_assertions)]
 fn resolve_python_project_dir() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -342,7 +318,10 @@ fn redact_for_log(line: &str) -> String {
     value.to_string()
 }
 
-#[cfg(test)]
+// `find_uv_executable` は `debug_assertions` でだけ定義されるため、
+// テストモジュールも同条件でゲートしないと `cargo test --release` で
+// コンパイルエラーになる。
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
 
