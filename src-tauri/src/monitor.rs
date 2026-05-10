@@ -583,6 +583,21 @@ fn handle_cycle_error<R: Runtime>(
                 DeadProcess::Mortal => mortal_slot.replace(new_proc),
             }
             info!(target: "monitor", "{:?} restarted", dead);
+            // 再起動直後の Python は uv のモジュールロード等で初期応答が遅く、
+            // そのまま次の run_cycle に入ると 3 秒タイムアウトを使い切って
+            // 再起動枠を浪費するだけになりがち。長めの SMOKE_RECV_TIMEOUT で
+            // 一度 ping を流してウォームアップし、応答可能な状態を確認してから
+            // 本ループへ戻す。失敗しても次の run_cycle 側のタイムアウト経路で
+            // 改めて検知できるので smoke 自身のエラーは握り潰す。
+            let warm = match dead {
+                DeadProcess::Recognition => rec_slot.current(),
+                DeadProcess::Mortal => mortal_slot.current(),
+            };
+            let label = match dead {
+                DeadProcess::Recognition => "recognition",
+                DeadProcess::Mortal => "mortal",
+            };
+            smoke_ping(warm.as_ref(), label);
         }
         Err(spawn_err) => {
             warn!(

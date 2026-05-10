@@ -166,9 +166,11 @@ impl PythonProcess {
                     debug!(target: "python_proc", "[{}] drop stale: {}", self.label, s.trim());
                 }
                 Ok(ReaderEvent::Eof) | Ok(ReaderEvent::Io(_)) => {
-                    // reader が既に死んでいる場合はその痕跡を捨ててよい。
-                    // 次の send_line / recv_line_timeout で改めて
-                    // Terminated を返すことになる。
+                    // reader スレッドは Eof / Io を流した直後に終了するので、
+                    // それ以降チャネルへ何も流れてこない。Disconnected を待つ
+                    // までもなくここで切り上げる (次の send_line /
+                    // recv_line_timeout が改めて Terminated を返す)。
+                    break;
                 }
                 Err(_) => break,
             }
