@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, Runtime};
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum PythonProcError {
@@ -459,12 +459,23 @@ fn reader_loop(stdout: ChildStdout, tx: mpsc::SyncSender<ReaderEvent>, label: St
 /// child が死ぬと stderr が EOF になりループを抜ける。送り先の emitter は
 /// 同期呼び出しなので、ループは BufReader が次の行を読み取る速度で進む =
 /// pipe バッファが詰まることはない (= デッドロック対策)。
+///
+/// バイト列で読んでから `String::from_utf8_lossy` で文字列化する点に注意。
+/// `BufRead::lines()` は invalid UTF-8 を `Err` で返すので、Windows / 非
+/// UTF-8 ロケールの Python が CP932 等を吐くとそこで reader スレッドが
+/// 落ちて stderr の drain が止まり、結果的に pipe バッファが詰まって child が
+/// ハングする (Codex P1 on PR #41)。U+FFFD 置換に倒して drain を継続する。
 fn stderr_loop(stderr: ChildStderr, label: String, emitter: Option<PythonLogEmitter>) {
-    let reader = BufReader::new(stderr);
-    for line_res in reader.lines() {
-        let line = match line_res {
-            Ok(s) => s,
+    let mut reader = BufReader::new(stderr);
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF: child の stderr が閉じた
+            Ok(_) => {}
             Err(e) => {
+                // OS レベルの I/O 失敗 (pipe が壊れた等)。ここまで来たら
+                // 続きを読む手段が無いので素直に抜ける。
                 debug!(
                     target: "python_proc",
                     "[{}] stderr read error: {}",
@@ -472,10 +483,16 @@ fn stderr_loop(stderr: ChildStderr, label: String, emitter: Option<PythonLogEmit
                 );
                 break;
             }
-        };
-        if line.is_empty() {
+        }
+        // 末尾の改行 (\n / \r\n) を取り除く。
+        while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
+            buf.pop();
+        }
+        if buf.is_empty() {
             continue;
         }
+        // invalid UTF-8 は U+FFFD に置換して握りつぶす (drain を止めない)。
+        let line = String::from_utf8_lossy(&buf);
         let (level, logger, message) = parse_log_line(&line);
         // tracing の target はマクロ展開時に決まる &'static str しか
         // 受け取れないので、source / logger は構造化フィールドで渡す。
@@ -487,7 +504,18 @@ fn stderr_loop(stderr: ChildStderr, label: String, emitter: Option<PythonLogEmit
                 "{}",
                 message
             ),
-            "WARNING" | "WARN" | "ERROR" | "CRITICAL" | "FATAL" => warn!(
+            "WARNING" | "WARN" => warn!(
+                target: "python_log",
+                source = %label,
+                level = %level,
+                logger = %logger,
+                "{}",
+                message
+            ),
+            // ERROR/CRITICAL/FATAL は tracing 側でも error! 相当の重み付けで
+            // 残すことで、後段のフィルタ/アラートが Python 由来のエラーを
+            // 拾えるようにする (Codex P2 on PR #41)。
+            "ERROR" | "CRITICAL" | "FATAL" => error!(
                 target: "python_log",
                 source = %label,
                 level = %level,
@@ -961,6 +989,57 @@ mod tests {
         );
     }
 
+    /// stderr に invalid UTF-8 (例: CP932 / Shift-JIS バイト列) が混ざっても
+    /// reader が落ちずに後続行を drain し続けることを確認する。
+    /// `BufRead::lines()` 由来の Err 即時 break を `read_until` + `from_utf8_lossy`
+    /// に切り替えたリグレッションテスト (Codex P1 on PR #41)。
+    #[test]
+    fn stderr_continues_draining_after_non_utf8_bytes() {
+        use std::sync::Arc;
+
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+
+        let collected: Arc<Mutex<Vec<PythonLogEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let collected_for_emitter = collected.clone();
+        let emitter: PythonLogEmitter = Box::new(move |evt| {
+            collected_for_emitter.lock().unwrap().push(evt);
+        });
+
+        // 1 行目: 不正 UTF-8 (0x82 0xA0 = Shift-JIS 'あ', UTF-8 では invalid)
+        // 2 行目: 構造化された有効な行
+        // 1 行目で reader が落ちると 2 行目は届かない。
+        let script = "import sys\n\
+                      sys.stderr.buffer.write(b'\\x82\\xa0\\n')\n\
+                      sys.stderr.buffer.write(b'INFO\\trecognition\\tafter-bad-bytes\\n')\n\
+                      sys.stderr.buffer.flush()\n";
+        let proc = PythonProcess::spawn(
+            "non-utf8",
+            &python,
+            &["-u", "-c", script],
+            None,
+            Some(emitter),
+        )
+        .expect("spawn non-utf8 python");
+
+        std::thread::sleep(Duration::from_millis(300));
+        proc.kill();
+
+        let events = collected.lock().unwrap();
+        assert!(
+            events.iter().any(|e| e.message == "after-bad-bytes"
+                && e.level == "INFO"
+                && e.logger == "recognition"),
+            "stderr drain stalled after non-UTF8 line; collected={:?}",
+            *events
+        );
+    }
+
     /// 大量の stderr ログ (10000 行) を吐いてもプロセス側がブロックしないことを
     /// 確認する。issue #9 受け入れ基準。stderr_loop が pipe を継続的に drain
     /// しているので、Python の stderr write はバッファ満杯で詰まらない。
@@ -988,14 +1067,9 @@ mod tests {
                           sys.stderr.write(f'INFO\\tflood\\tline-{i}\\n')\n\
                       sys.stderr.flush()\n\
                       sys.stdin.read()\n";
-        let proc = PythonProcess::spawn(
-            "flood",
-            &python,
-            &["-u", "-c", script],
-            None,
-            Some(emitter),
-        )
-        .expect("spawn flood python");
+        let proc =
+            PythonProcess::spawn("flood", &python, &["-u", "-c", script], None, Some(emitter))
+                .expect("spawn flood python");
 
         // stderr_loop が drain し終わるまで待つ。10000 行の処理は数十 ms の想定。
         let started = Instant::now();
