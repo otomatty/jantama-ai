@@ -3,12 +3,13 @@ import { MainScreen } from "@/screens/MainScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 import { useAppState } from "@/state/appState";
 import { loadSettings } from "@/lib/tauriCommands";
-import type { GameBoardSummary, InferenceResult } from "@/types";
+import type { AppError, GameBoardSummary, InferenceResult } from "@/types";
 
 type Screen = "main" | "settings";
 
 function App() {
-  const { state, setPhase, setSettings, setMonitoring, setInference, setBoard } = useAppState();
+  const { state, setPhase, setSettings, setMonitoring, setInference, setBoard, setError } =
+    useAppState();
   const [screen, setScreen] = useState<Screen>("main");
 
   // 起動時に保存済み設定を読み込む
@@ -64,6 +65,14 @@ function App() {
     [setInference, setBoard, setMonitoring],
   );
 
+  const handleRecognitionError = useCallback(
+    (error: AppError) => {
+      setError(error);
+      setPhase("error");
+    },
+    [setError, setPhase],
+  );
+
   if (screen === "settings") {
     return (
       <SettingsScreen
@@ -86,6 +95,7 @@ function App() {
       onOpenSettings={handleOpenSettings}
       onMonitoringChange={handleMonitoringChange}
       onInferenceUpdate={handleInferenceUpdate}
+      onRecognitionError={handleRecognitionError}
     />
   );
 }
