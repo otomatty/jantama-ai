@@ -7,7 +7,7 @@ import {
   type RoiRect,
   type RoiRegionId,
 } from "@/types";
-import { captureWindowForCalibration } from "@/lib/tauriCommands";
+import { captureWindowForCalibration, saveSettings } from "@/lib/tauriCommands";
 import { REGION_DEFS, getRegionRect, setRegionRect } from "@/lib/roiCalibration";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +38,8 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
   const [capture, setCapture] = useState<Capture | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   // ドラッグの実体は ref に持たせて mousemove 中の re-render コストを抑える。
   // 描画用には `drag` ステートが要るが、ここは tick で region 切り替えと
   // 終了タイミングだけを伝え、座標は ref から読む。
@@ -135,8 +137,28 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
     setCalibration((prev) => setRegionRect(prev, region, null));
   };
 
-  const handleSave = () => {
-    onSaved({ ...settings, roi_calibration: calibration });
+  const handleSave = async () => {
+    // 永続化に失敗したまま遷移すると、UI は新しい ROI を表示するのに store には
+    // 古い ROI が残り続ける不整合が発生する (start_monitoring は store から
+    // settings を読むため、見えている ROI と実際に使われる ROI が乖離する)。
+    // Codex P1 / CodeRabbit Major (PR #42)。
+    // 失敗時はこの画面に留まってエラーを出し、ユーザに再試行させる。
+    const next: AppSettings = { ...settings, roi_calibration: calibration };
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await saveSettings(next);
+    } catch (e) {
+      setSaveError(
+        `設定の保存に失敗しました: ${
+          e instanceof Error ? e.message : String(e)
+        }。再試行してください`,
+      );
+      setSaving(false);
+      return;
+    }
+    setSaving(false);
+    onSaved(next);
   };
 
   const handleResetAll = () => {
@@ -339,29 +361,46 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
       </div>
 
       {/* フッター */}
-      <div className="flex gap-2 border-t border-ink-200 bg-white p-3">
-        <button
-          type="button"
-          onClick={handleResetAll}
-          className="cursor-pointer rounded-lg border border-ink-200 bg-white px-3 py-3 font-jp text-sm font-semibold text-ink-900 transition-colors hover:bg-ink-50"
-        >
-          全クリア
-        </button>
-        <button
-          type="button"
-          onClick={onBack}
-          className="flex-1 cursor-pointer rounded-lg border border-ink-200 bg-white px-3 py-3 font-jp text-sm font-semibold text-ink-900 transition-colors hover:bg-ink-50"
-        >
-          キャンセル
-        </button>
-        <button
-          type="button"
-          onClick={handleSave}
-          className="flex-1 cursor-pointer rounded-lg border-0 px-3 py-3 font-jp text-sm font-bold text-white transition-opacity hover:opacity-95"
-          style={{ background: "var(--gradient-acial)" }}
-        >
-          保存
-        </button>
+      <div className="border-t border-ink-200 bg-white p-3">
+        {saveError && (
+          <div
+            role="alert"
+            className="mb-2 rounded-md px-3 py-2 font-jp text-[12px] font-semibold text-danger"
+            style={{
+              background: "var(--color-danger-bg)",
+              border: "1px solid rgba(199,27,0,0.18)",
+            }}
+          >
+            {saveError}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={handleResetAll}
+            disabled={saving}
+            className="cursor-pointer rounded-lg border border-ink-200 bg-white px-3 py-3 font-jp text-sm font-semibold text-ink-900 transition-colors hover:bg-ink-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            全クリア
+          </button>
+          <button
+            type="button"
+            onClick={onBack}
+            disabled={saving}
+            className="flex-1 cursor-pointer rounded-lg border border-ink-200 bg-white px-3 py-3 font-jp text-sm font-semibold text-ink-900 transition-colors hover:bg-ink-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            キャンセル
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="flex-1 cursor-pointer rounded-lg border-0 px-3 py-3 font-jp text-sm font-bold text-white transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+            style={{ background: "var(--gradient-acial)" }}
+          >
+            {saving ? "保存中..." : "保存"}
+          </button>
+        </div>
       </div>
     </div>
   );

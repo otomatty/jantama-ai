@@ -13,6 +13,12 @@ vi.mock("@/lib/tauriCommands", async () => {
 });
 
 beforeEach(() => {
+  // Vitest はデフォルトでテスト間にモック呼び出し履歴をクリアしないので、
+  // `toHaveBeenCalled()` が前のテスト由来の呼び出しを拾ってしまう。本テストは
+  // 全 3 ケースで captureWindowForCalibration の呼び出しを検証するため、
+  // 履歴をリセットしてから mockResolvedValue を再設定する
+  // (CodeRabbit Minor on PR #42)。
+  vi.clearAllMocks();
   vi.mocked(tauriCommands.captureWindowForCalibration).mockResolvedValue({
     width: 1920,
     height: 1080,
@@ -78,9 +84,10 @@ describe("CalibrationScreen", () => {
         fireEvent.mouseUp(canvas, { clientX: 120, clientY: 60 });
       });
 
-      // 確定後に「保存」を押すと onSaved に hand が乗った settings が来る
+      // 確定後に「保存」を押すと onSaved に hand が乗った settings が来る。
+      // handleSave は saveSettings の await を挟むため microtask を待つ必要がある。
       fireEvent.click(screen.getByRole("button", { name: "保存" }));
-      expect(onSaved).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
       const next = onSaved.mock.calls[0][0];
       expect(next.roi_calibration.hand).toEqual({ x: 0.2, y: 0.2, w: 0.4, h: 0.4 });
     } finally {
@@ -104,12 +111,36 @@ describe("CalibrationScreen", () => {
         fireEvent.mouseUp(canvas, { clientX: 50, clientY: 50 });
       });
       fireEvent.click(screen.getByRole("button", { name: "保存" }));
-      expect(onSaved).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
       const next = onSaved.mock.calls[0][0];
       // 確定されていないので EMPTY のまま
       expect(next.roi_calibration.hand).toBeNull();
     } finally {
       restore();
+    }
+  });
+
+  it("saveSettings 失敗時は onSaved を呼ばずエラー表示で画面に留まる", async () => {
+    // 永続化に失敗したまま遷移すると UI / store が乖離する不整合が起きるため、
+    // 保存失敗時は onSaved を呼ばないことを確認する (Codex P1 / CodeRabbit Major
+    // on PR #42 のリグレッションガード)。
+    const onSaved = vi.fn();
+    const saveSpy = vi
+      .spyOn(tauriCommands, "saveSettings")
+      .mockRejectedValue(new Error("disk full"));
+    try {
+      render(<CalibrationScreen settings={DEFAULT_SETTINGS} onBack={() => {}} onSaved={onSaved} />);
+      await waitFor(() => {
+        expect(tauriCommands.captureWindowForCalibration).toHaveBeenCalled();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "保存" }));
+      // saveSettings が reject されるまで待つ
+      await waitFor(() => expect(saveSpy).toHaveBeenCalled());
+      // エラー文言が出る
+      await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/保存に失敗/));
+      expect(onSaved).not.toHaveBeenCalled();
+    } finally {
+      saveSpy.mockRestore();
     }
   });
 });

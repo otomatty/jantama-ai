@@ -3,7 +3,7 @@ import { MainScreen } from "@/screens/MainScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 import { CalibrationScreen } from "@/screens/CalibrationScreen";
 import { useAppState } from "@/state/appState";
-import { loadSettings, saveSettings } from "@/lib/tauriCommands";
+import { loadSettings } from "@/lib/tauriCommands";
 import type { AppError, AppPhase, AppSettings, GameBoardSummary, InferenceResult } from "@/types";
 
 type Screen = "main" | "settings" | "calibration";
@@ -135,14 +135,10 @@ function App() {
       <CalibrationScreen
         settings={state.settings}
         onBack={() => setScreen("settings")}
-        onSaved={async (next: AppSettings) => {
-          // キャリブレーションは「保存=即永続化」して設定画面に戻す。設定画面側の
-          // 保存ボタンを押し忘れてもキャリブレーション結果は失われない。
-          try {
-            await saveSettings(next);
-          } catch {
-            // 永続化失敗時もメモリ上の設定は更新しておき、ユーザに再保存を促す。
-          }
+        onSaved={(next: AppSettings) => {
+          // 永続化は CalibrationScreen 側で完了済みの前提でここに来る (失敗時は
+          // 画面側がエラーを表示してこの onSaved を呼ばないので、UI / store 不整合
+          // が生まれない。Codex P1 / CodeRabbit Major on PR #42)。
           setSettings(next);
           // ROI 編集だけでは phase は変わらない (capture_target / mortal_model は
           // 維持される) が、設定昇格は常に phase 再計算とセットにする方針なので
