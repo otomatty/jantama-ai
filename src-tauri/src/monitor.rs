@@ -82,17 +82,30 @@ impl ProcessSlot {
         self.inner.lock().unwrap().clone()
     }
 
-    /// 古いプロセスを殺してから新プロセスへ差し替える。
-    fn replace(&self, new_proc: PythonProcess) {
-        let new_arc = Arc::new(new_proc);
-        let old = {
-            let mut guard = self.inner.lock().unwrap();
-            std::mem::replace(&mut *guard, new_arc)
-        };
-        // 残っているかもしれない古いプロセスは確実に止める。
-        // 他に Arc を持っている呼び出し側がいれば、Drop ではなくここで明示的に
-        // kill してロック中の recv_line を解放させる。
+    /// `stop_flag` をスロットの mutex 内で再確認しつつ差し替える。
+    ///
+    /// `MonitorHandle::stop` は (1) `stop_flag` を立て (2) `kill()` で
+    /// このスロットの mutex を取りに来る、という二段階で動く。再起動側で
+    /// 「flag を見てから差し替える」を別ステップに分けると、間に stop の
+    /// kill が割り込んで「stop 後に新プロセスがスロットへ載る」TOCTOU が
+    /// 起きる。スロット mutex を握ったまま flag を読み、立っていれば
+    /// 差し替えず `Some(new_proc)` で呼び出し側に返す。返した側が責任を
+    /// 持って kill する。
+    fn replace_unless_stopped(
+        &self,
+        new_proc: PythonProcess,
+        stop_flag: &AtomicBool,
+    ) -> Option<PythonProcess> {
+        let mut guard = self.inner.lock().unwrap();
+        if stop_flag.load(Ordering::SeqCst) {
+            return Some(new_proc);
+        }
+        let old = std::mem::replace(&mut *guard, Arc::new(new_proc));
+        // 古い方の kill はロックを離してから (kill は child wait + reader join で
+        // 数十 ms ブロックし得るので、保持する必要のないロックは早めに開放する)。
+        drop(guard);
         old.kill();
+        None
     }
 
     /// 現在格納しているプロセスを kill する (差し替えはしない)。
@@ -579,18 +592,21 @@ fn handle_cycle_error<R: Runtime>(
     match spawn_result {
         Ok(new_proc) => {
             // spawn_* 中に MonitorHandle::stop() が走った可能性がある。
-            // すでに古い Arc は kill 済みなので、ここで何も考えずに replace すると
-            // 新しいプロセスがどのスロットからも監視されないまま生き残り、
-            // MonitorHandle::Drop の二重 stop() に頼ることになる。stop_flag を
-            // 再確認し、立っていれば新プロセスをここで殺してスロットには戻さない。
-            if stop_flag.load(Ordering::SeqCst) {
-                info!(target: "monitor", "stop requested during {:?} respawn; killing new process", dead);
-                new_proc.kill();
+            // `replace_unless_stopped` がスロット mutex 内で stop_flag を読むので、
+            // stop() の (flag 立て→slot.kill) と差し替えが交差しても、新プロセスが
+            // 「stop 後にスロットへ載って取り残される」状態にはならない。
+            let bailed = match dead {
+                DeadProcess::Recognition => rec_slot.replace_unless_stopped(new_proc, stop_flag),
+                DeadProcess::Mortal => mortal_slot.replace_unless_stopped(new_proc, stop_flag),
+            };
+            if let Some(unused) = bailed {
+                info!(
+                    target: "monitor",
+                    "stop requested during {:?} respawn; killing new process",
+                    dead
+                );
+                unused.kill();
                 return;
-            }
-            match dead {
-                DeadProcess::Recognition => rec_slot.replace(new_proc),
-                DeadProcess::Mortal => mortal_slot.replace(new_proc),
             }
             info!(target: "monitor", "{:?} restarted", dead);
             // 再起動直後の Python は uv のモジュールロード等で初期応答が遅く、
