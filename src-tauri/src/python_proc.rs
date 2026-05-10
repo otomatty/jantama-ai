@@ -10,7 +10,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TrySendError};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 // `Manager` は release ビルドでだけ `app.path()` を解決するために必要。
 // debug ビルドでは未使用となるため条件付きで取り込む。
 #[cfg(not(debug_assertions))]
@@ -145,26 +145,64 @@ impl PythonProcess {
         self.recv_line()
     }
 
-    /// タイムアウト付きの送信→受信。
+    /// タイムアウト付きの送信→受信 (フィルタ無し版)。
     ///
-    /// `timeout` を超えても応答が来なければ [`PythonProcError::Timeout`]
-    /// を返す。応答が遅れている = 認識/推論が詰まっているケースの
-    /// バックストップで、PRD §7.4「Mortal 推論失敗」「認識失敗」に対応。
-    ///
-    /// 直前の `request_line_timeout` がタイムアウトで戻った場合、Python 側は
-    /// その応答を後から書き出してくる可能性がある。次の往復ではその応答が
-    /// 本来欲しい応答より先にチャネルへ届き、`id` ミスマッチで永遠に
-    /// 1 サイクルずれた応答を読み続ける羽目になるので、送信前にチャネルへ
-    /// 溜まった「古い応答」を drain しておく。
+    /// `request_line_with_filter` を使えば前往復の遅延応答が混入しても
+    /// 自動でスキップできるが、この互換 API はフィルタを持たないため、
+    /// 「直前の往復がタイムアウトで終わったが応答だけ後から来た」状況では
+    /// stale を返す可能性がある。新規コードは `request_line_with_filter`
+    /// を使うこと。
     pub fn request_line_timeout(
         &self,
         line: &str,
         timeout: Duration,
     ) -> Result<String, PythonProcError> {
+        self.request_line_with_filter(line, timeout, |_| true)
+    }
+
+    /// タイムアウト付きの送信→受信。レスポンスごとに `accept` を呼び、
+    /// `false` を返した行は捨てて受信を続ける。
+    ///
+    /// 用途: 直前の `request_line_*` がタイムアウトで戻った後、Python 側が
+    /// その応答を遅れて書き出してくると、次の往復ではその stale が
+    /// チャネル先頭に詰まる。送信前に `drain_pending` で消費前の stale を
+    /// 落としつつ、`accept` (例: 期待した `id` に一致するか) で送信後に
+    /// 入ってきた stale もスキップしていく。これにより
+    ///
+    ///   - drain と recv の隙間に stale が滑り込んでも検出できる
+    ///   - 永続的に Python が遅い場合は overall timeout で抜ける
+    ///
+    /// transport 層 (`python_proc`) は `accept` の中身を知らないので
+    /// JSON / 独自プロトコル等は呼び出し側 (`run_cycle`) のクロージャに閉じる。
+    pub fn request_line_with_filter<F>(
+        &self,
+        line: &str,
+        timeout: Duration,
+        accept: F,
+    ) -> Result<String, PythonProcError>
+    where
+        F: Fn(&str) -> bool,
+    {
         let _guard = self.roundtrip.lock().unwrap();
         self.drain_pending();
         self.send_line(line)?;
-        self.recv_line_timeout(timeout)
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(PythonProcError::Timeout(timeout));
+            }
+            let response = self.recv_line_timeout(remaining)?;
+            if accept(&response) {
+                return Ok(response);
+            }
+            debug!(
+                target: "python_proc",
+                "[{}] filter rejected (likely stale): {}",
+                self.label,
+                response.trim()
+            );
+        }
     }
 
     /// チャネルに溜まっている未読イベントを破棄する。
@@ -584,6 +622,42 @@ mod tests {
             "got {:?}",
             result
         );
+    }
+
+    /// `request_line_with_filter` がフィルタで弾かれた応答をスキップして
+    /// 受信を続け、許可された応答だけを返すことを確認する。
+    /// stale 応答対策 (Codex review on PR #40) のリグレッションテスト。
+    #[test]
+    fn request_line_with_filter_skips_rejected_responses() {
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+        // 1 行入力を受け取る前に "stale" を 2 行流し、入力が来たら "fresh" を返す。
+        // フィルタが stale を捨てて fresh だけを採用できるかをチェック。
+        let script = "import sys\n\
+                      sys.stdout.write('stale-1\\n')\n\
+                      sys.stdout.write('stale-2\\n')\n\
+                      sys.stdout.flush()\n\
+                      for line in sys.stdin:\n    \
+                          sys.stdout.write('fresh\\n')\n    \
+                          sys.stdout.flush()\n    \
+                          break\n";
+        let proc = PythonProcess::spawn("filter", &python, &["-u", "-c", script], None)
+            .expect("spawn filter python");
+
+        // stale が reader 側に流れ込むまで少し待つ。
+        std::thread::sleep(Duration::from_millis(100));
+
+        let resp = proc
+            .request_line_with_filter("go\n", Duration::from_secs(5), |line| {
+                line.trim() == "fresh"
+            })
+            .expect("got fresh response");
+        assert_eq!(resp.trim(), "fresh");
     }
 
     /// 即終了する Python を相手に `request_line_timeout` が

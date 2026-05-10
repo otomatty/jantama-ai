@@ -435,8 +435,14 @@ fn run_cycle(
         "id": frame_id,
         "image_b64": image_b64,
     });
+    // 直前のサイクルがタイムアウトで終わった場合、その応答が今このサイクルの
+    // 受信窓に滑り込んでくる可能性がある。drain だけでは送信〜recv の隙間で
+    // 届いた stale を取りこぼすので、`accept` フィルタで「期待した id でない
+    // 応答は捨てて受信を続ける」ことで正しい応答に追い付く。
     let rec_line = recognition
-        .request_line_timeout(&frame_req.to_string(), PYTHON_RECV_TIMEOUT)
+        .request_line_with_filter(&frame_req.to_string(), PYTHON_RECV_TIMEOUT, |line| {
+            response_id_matches(line, frame_id)
+        })
         .map_err(map_recognition_error)?;
     let rec_parsed: serde_json::Value = serde_json::from_str(rec_line.trim())
         .map_err(|e| CycleError::RecognitionParseFail(format!("json: {}", e)))?;
@@ -449,7 +455,7 @@ fn run_cycle(
                 .unwrap_or("")
         )));
     }
-    // 取り違えガード: id が要求と一致しない応答は古いフレームの結果として捨てる。
+    // フィルタを通過した時点で id は一致しているが、欠損ガードのため再確認する。
     let rec_id = rec_parsed
         .get("id")
         .and_then(|v| v.as_i64())
@@ -473,7 +479,9 @@ fn run_cycle(
         "tenhou_json": tenhou_json,
     });
     let infer_line = mortal
-        .request_line_timeout(&infer_req.to_string(), PYTHON_RECV_TIMEOUT)
+        .request_line_with_filter(&infer_req.to_string(), PYTHON_RECV_TIMEOUT, |line| {
+            response_id_matches(line, frame_id)
+        })
         .map_err(map_mortal_error)?;
     let infer_parsed: serde_json::Value = serde_json::from_str(infer_line.trim())
         .map_err(|e| CycleError::MortalParseFail(format!("json: {}", e)))?;
@@ -751,6 +759,19 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
         score,
         round_label,
     })
+}
+
+/// `request_line_with_filter` のクロージャから呼ぶための受信応答 id 判定。
+///
+/// JSON として解釈できない / `id` が欠ける / 整数にならない応答は「自分宛
+/// ではない」とみなして reject する。直前の往復のタイムアウト後に滑り込んだ
+/// stale をここで弾くことで、後段の `id` ミスマッチで *Invalid を吐く前に
+/// 同じサイクル内でリトライを完結させる。
+fn response_id_matches(line: &str, expected: i64) -> bool {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .and_then(|v| v.get("id").and_then(|x| x.as_i64()))
+        .is_some_and(|id| id == expected)
 }
 
 /// 自家の風 (`self_wind`) を `scores` 配列のインデックスへ写像する。
