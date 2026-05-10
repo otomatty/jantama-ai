@@ -763,15 +763,27 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
 
 /// `request_line_with_filter` のクロージャから呼ぶための受信応答 id 判定。
 ///
-/// JSON として解釈できない / `id` が欠ける / 整数にならない応答は「自分宛
-/// ではない」とみなして reject する。直前の往復のタイムアウト後に滑り込んだ
-/// stale をここで弾くことで、後段の `id` ミスマッチで *Invalid を吐く前に
-/// 同じサイクル内でリトライを完結させる。
+/// 「自分宛ではない」と確信できる応答だけ reject する:
+///   - パース可能 + `id` が整数 + 期待値と異なる → 直前フレームの stale
+///
+/// それ以外 (JSON パース失敗 / `id` 欠損 / 非整数 / 期待値と一致) は accept し、
+/// `run_cycle` 側のチェック (`*ParseFail` / `*Invalid`) に委ねる。malformed な
+/// 応答を「stale」と見なして捨ててしまうと、本来即座にエラーを返すべきなのに
+/// `PYTHON_RECV_TIMEOUT` (3 秒) ぶら下がってから `*Timeout` を出すことになり、
+/// プロトコル退行が隠れる + 1 フレーム遅延する (Codex P2 on PR #40)。
 fn response_id_matches(line: &str, expected: i64) -> bool {
-    serde_json::from_str::<serde_json::Value>(line.trim())
-        .ok()
-        .and_then(|v| v.get("id").and_then(|x| x.as_i64()))
-        .is_some_and(|id| id == expected)
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        // パース不能 → run_cycle で *ParseFail として即時失敗させる
+        return true;
+    };
+    match value.get("id").and_then(|x| x.as_i64()) {
+        // id が一致 → 期待した応答
+        Some(id) if id == expected => true,
+        // id が異なる整数 → 別フレームの stale とみなして次の応答へ
+        Some(_) => false,
+        // id 欠損 / 非整数 → run_cycle の Invalid ガードに任せる
+        None => true,
+    }
 }
 
 /// 自家の風 (`self_wind`) を `scores` 配列のインデックスへ写像する。
@@ -937,5 +949,24 @@ mod tests {
             "pipe",
         )));
         assert!(matches!(broken_pipe, CycleError::MortalDied));
+    }
+
+    /// `response_id_matches` は「自分宛ではないと確信できる応答」(=別 id の
+    /// 整数を持つもの) だけを reject し、それ以外 (一致 / パース不能 / id 欠損 /
+    /// 非整数) は accept する。malformed を reject すると run_cycle が timeout
+    /// まで待つことになり、本来即時に *ParseFail / *Invalid を返すべき
+    /// プロトコル退行を隠してしまう (Codex P2 on PR #40)。
+    #[test]
+    fn response_id_matches_accepts_matching_and_malformed_rejects_other_id() {
+        // 一致 → accept
+        assert!(response_id_matches(r#"{"id":7,"type":"result"}"#, 7));
+        // 別 id → reject
+        assert!(!response_id_matches(r#"{"id":6,"type":"result"}"#, 7));
+        // パース不能 → accept (run_cycle で *ParseFail にする)
+        assert!(response_id_matches("not json {", 7));
+        // id 欠損 → accept (run_cycle の Invalid ガードで拾う)
+        assert!(response_id_matches(r#"{"type":"result"}"#, 7));
+        // 非整数 id → accept (同上)
+        assert!(response_id_matches(r#"{"id":"7","type":"result"}"#, 7));
     }
 }
