@@ -839,7 +839,7 @@ mod tests {
         assert_eq!(CycleError::Capture("x".into()).kind(), "capture");
         assert_eq!(CycleError::PngEncode("x".into()).kind(), "capture");
 
-        // recognition 系 (timeout / parse fail / died) は全て "recognition"
+        // recognition 系 (timeout / parse fail / died / io) は全て "recognition"
         assert_eq!(CycleError::RecognitionTimeout.kind(), "recognition");
         assert_eq!(CycleError::RecognitionDied.kind(), "recognition");
         assert_eq!(
@@ -850,12 +850,21 @@ mod tests {
             CycleError::RecognitionInvalid("x".into()).kind(),
             "recognition"
         );
+        assert_eq!(
+            CycleError::RecognitionIo(PythonProcError::SpawnFailed(std::io::Error::other("x")))
+                .kind(),
+            "recognition"
+        );
 
         // mortal 系は全て "inference" (フロント側 AppError.type の語彙)
         assert_eq!(CycleError::MortalTimeout.kind(), "inference");
         assert_eq!(CycleError::MortalDied.kind(), "inference");
         assert_eq!(CycleError::MortalParseFail("x".into()).kind(), "inference");
         assert_eq!(CycleError::MortalInvalid("x".into()).kind(), "inference");
+        assert_eq!(
+            CycleError::MortalIo(PythonProcError::SpawnFailed(std::io::Error::other("x"))).kind(),
+            "inference"
+        );
     }
 
     #[test]
