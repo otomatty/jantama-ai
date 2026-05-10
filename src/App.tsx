@@ -61,8 +61,13 @@ function App() {
       setInference(inference);
       setBoard(board);
       setMonitoring({ last_recognized_at: inference.timestamp });
+      // 直前のサイクルが recognition-error で phase=error に固定されていても、
+      // 次に成功推論が届いたら自動復帰させる。
+      // 一過性のキャプチャ失敗で UI が永続的にエラー画面に張り付くのを防ぐ。
+      setError(null);
+      setPhase(board ? "watching_recommend" : "watching_no_board");
     },
-    [setInference, setBoard, setMonitoring],
+    [setInference, setBoard, setMonitoring, setError, setPhase],
   );
 
   const handleRecognitionError = useCallback(

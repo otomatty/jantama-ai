@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { runStubInference } from "@/lib/tauriCommands";
 import type { AppError, GameBoardSummary, InferenceResult } from "@/types";
@@ -23,9 +24,12 @@ interface UseInferenceEventsOptions {
 
 const STUB_INTERVAL_MS = 5000;
 
-function isTauri(): boolean {
-  const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
-  return typeof w.__TAURI_INTERNALS__ !== "undefined";
+function toAppError(kind: AppError["type"], fallbackMessage: string, e: unknown): AppError {
+  return {
+    type: kind,
+    message: e instanceof Error ? e.message : fallbackMessage,
+    occurred_at: new Date().toISOString(),
+  };
 }
 
 /**
@@ -51,8 +55,14 @@ export function useInferenceEvents({
       // ブラウザ単体動作確認用: 5 秒に 1 回スタブ推論を流す
       let cancelled = false;
       const fire = async () => {
-        const { inference, board } = await runStubInference();
-        if (!cancelled) onInference(inference, board);
+        try {
+          const { inference, board } = await runStubInference();
+          if (!cancelled) onInference(inference, board);
+        } catch (e) {
+          if (!cancelled) {
+            onError(toAppError("unknown", "stub inference failed", e));
+          }
+        }
       };
       fire();
       const id = setInterval(fire, STUB_INTERVAL_MS);
@@ -67,22 +77,32 @@ export function useInferenceEvents({
     let errorUnlisten: UnlistenFn | null = null;
 
     (async () => {
-      const [inferenceUn, errorUn] = await Promise.all([
-        listen<InferenceEventPayload>("inference-result", (event) => {
-          onInference(event.payload.inference, event.payload.board ?? null);
-        }),
-        listen<AppError>("recognition-error", (event) => {
-          onError(event.payload);
-        }),
-      ]);
-      // listen の登録中に watching が false に戻った場合は即解除
-      if (cancelled) {
-        inferenceUn();
-        errorUn();
-        return;
+      try {
+        const [inferenceUn, errorUn] = await Promise.all([
+          listen<InferenceEventPayload>("inference-result", (event) => {
+            // 監視 OFF と listener 解除の競合で古いイベントが届くことがあるため
+            // コールバック側でも cancelled を確認する
+            if (cancelled) return;
+            onInference(event.payload.inference, event.payload.board ?? null);
+          }),
+          listen<AppError>("recognition-error", (event) => {
+            if (cancelled) return;
+            onError(event.payload);
+          }),
+        ]);
+        // listen の登録中に watching が false に戻った場合は即解除
+        if (cancelled) {
+          inferenceUn();
+          errorUn();
+          return;
+        }
+        inferenceUnlisten = inferenceUn;
+        errorUnlisten = errorUn;
+      } catch (e) {
+        if (!cancelled) {
+          onError(toAppError("unknown", "failed to subscribe tauri events", e));
+        }
       }
-      inferenceUnlisten = inferenceUn;
-      errorUnlisten = errorUn;
     })();
 
     return () => {

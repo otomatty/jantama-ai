@@ -3,6 +3,7 @@ import { act, render, screen } from "@testing-library/react";
 import { MainScreen } from "./MainScreen";
 import { INITIAL_APP_STATE } from "@/state/appState";
 import { SCENARIO_FIXTURES } from "@/lib/scenarios";
+import { runStubInference } from "@/lib/tauriCommands";
 import type { AppError, GameBoardSummary, InferenceResult } from "@/types";
 
 // `useInferenceEvents` 内部の `@tauri-apps/api/event#listen` を差し替えて、
@@ -27,12 +28,22 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
+vi.mock("@/lib/tauriCommands", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/tauriCommands")>("@/lib/tauriCommands");
+  return {
+    ...actual,
+    runStubInference: vi.fn(actual.runStubInference),
+  };
+});
+
+// `@tauri-apps/api/core` の `isTauri` は `(globalThis || window).isTauri` の
+// truthy 判定のため、テストでは同じグローバルを直接トグルする。
 function setTauriEnv(enabled: boolean) {
-  const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
+  const g = globalThis as unknown as { isTauri?: boolean };
   if (enabled) {
-    w.__TAURI_INTERNALS__ = {};
+    g.isTauri = true;
   } else {
-    delete w.__TAURI_INTERNALS__;
+    delete g.isTauri;
   }
 }
 
@@ -48,6 +59,7 @@ describe("MainScreen", () => {
     handlers.inference = null;
     handlers.error = null;
     setTauriEnv(false);
+    (runStubInference as unknown as ReturnType<typeof vi.fn>).mockClear();
   });
 
   afterEach(() => {
@@ -155,6 +167,52 @@ describe("MainScreen", () => {
       handlers.error!({ payload: errorPayload });
     });
     expect(onRecognitionError).toHaveBeenCalledWith(errorPayload);
+  });
+
+  it("非 Tauri 環境では 5 秒間隔のスタブ推論が onInferenceUpdate を呼び続ける", async () => {
+    setTauriEnv(false);
+    const fixture = SCENARIO_FIXTURES.dahai;
+    const stub = runStubInference as unknown as ReturnType<typeof vi.fn>;
+    stub.mockResolvedValue({ inference: fixture.inference, board: fixture.board });
+
+    vi.useFakeTimers();
+    try {
+      const onInferenceUpdate = vi.fn();
+      render(
+        <MainScreen
+          state={{
+            ...INITIAL_APP_STATE,
+            phase: "watching_no_board",
+            monitoring: {
+              watching: true,
+              capture_target_window_title: "雀魂",
+              last_recognized_at: null,
+            },
+          }}
+          onOpenSettings={vi.fn()}
+          onMonitoringChange={vi.fn()}
+          onInferenceUpdate={onInferenceUpdate}
+          onRecognitionError={vi.fn()}
+        />,
+      );
+
+      // 初回 fire() 即時呼び出しの解決を待つ
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(stub).toHaveBeenCalledTimes(1);
+      expect(onInferenceUpdate).toHaveBeenCalledWith(fixture.inference, fixture.board);
+
+      // 5 秒経過で 2 回目が走ることを確認
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(stub).toHaveBeenCalledTimes(2);
+    } finally {
+      stub.mockReset();
+      vi.useRealTimers();
+    }
   });
 
   it("監視 OFF に戻ると Tauri Event の listener を unsubscribe する", async () => {
