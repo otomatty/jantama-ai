@@ -5,8 +5,7 @@ import { DEFAULT_SETTINGS } from "@/types";
 import * as tauriCommands from "@/lib/tauriCommands";
 
 vi.mock("@/lib/tauriCommands", async () => {
-  const actual =
-    await vi.importActual<typeof import("@/lib/tauriCommands")>("@/lib/tauriCommands");
+  const actual = await vi.importActual<typeof import("@/lib/tauriCommands")>("@/lib/tauriCommands");
   return {
     ...actual,
     captureWindowForCalibration: vi.fn(actual.captureWindowForCalibration),
@@ -47,13 +46,7 @@ function stubCanvasRect() {
 
 describe("CalibrationScreen", () => {
   it("起動時に capture を取りに行き、未設定時はプレースホルダから始まる", async () => {
-    render(
-      <CalibrationScreen
-        settings={DEFAULT_SETTINGS}
-        onBack={() => {}}
-        onSaved={() => {}}
-      />,
-    );
+    render(<CalibrationScreen settings={DEFAULT_SETTINGS} onBack={() => {}} onSaved={() => {}} />);
     await waitFor(() => {
       expect(tauriCommands.captureWindowForCalibration).toHaveBeenCalled();
     });
@@ -64,9 +57,7 @@ describe("CalibrationScreen", () => {
 
   it("ドラッグで矩形を確定すると比率が onSaved に渡る", async () => {
     const onSaved = vi.fn();
-    render(
-      <CalibrationScreen settings={DEFAULT_SETTINGS} onBack={() => {}} onSaved={onSaved} />,
-    );
+    render(<CalibrationScreen settings={DEFAULT_SETTINGS} onBack={() => {}} onSaved={onSaved} />);
     await waitFor(() => {
       expect(tauriCommands.captureWindowForCalibration).toHaveBeenCalled();
     });
@@ -99,9 +90,7 @@ describe("CalibrationScreen", () => {
 
   it("極小ドラッグ (誤クリック) は矩形として確定しない", async () => {
     const onSaved = vi.fn();
-    render(
-      <CalibrationScreen settings={DEFAULT_SETTINGS} onBack={() => {}} onSaved={onSaved} />,
-    );
+    render(<CalibrationScreen settings={DEFAULT_SETTINGS} onBack={() => {}} onSaved={onSaved} />);
     await waitFor(() => {
       expect(tauriCommands.captureWindowForCalibration).toHaveBeenCalled();
     });

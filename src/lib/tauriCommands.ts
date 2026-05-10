@@ -131,9 +131,7 @@ const STUB_CAPTURE_PNG_B64 =
   // (1x1 PNG transparent → CSS で stretching: 雀魂を起動した実機で再確認すること)
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=";
 
-export async function captureWindowForCalibration(
-  windowId: string,
-): Promise<CalibrationCapture> {
+export async function captureWindowForCalibration(windowId: string): Promise<CalibrationCapture> {
   if (!isTauri()) {
     return {
       width: 1920,

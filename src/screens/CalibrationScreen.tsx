@@ -8,11 +8,7 @@ import {
   type RoiRegionId,
 } from "@/types";
 import { captureWindowForCalibration } from "@/lib/tauriCommands";
-import {
-  REGION_DEFS,
-  getRegionRect,
-  setRegionRect,
-} from "@/lib/roiCalibration";
+import { REGION_DEFS, getRegionRect, setRegionRect } from "@/lib/roiCalibration";
 import { cn } from "@/lib/utils";
 
 interface CalibrationScreenProps {
@@ -49,9 +45,7 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
     setCapturing(true);
     setCaptureError(null);
     try {
-      const result = await captureWindowForCalibration(
-        settings.capture_target_window_id ?? "",
-      );
+      const result = await captureWindowForCalibration(settings.capture_target_window_id ?? "");
       setCapture({
         width: result.width,
         height: result.height,
@@ -244,7 +238,10 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
           <div
             role="alert"
             className="rounded-md px-3 py-2 font-jp text-[12px] font-semibold text-danger"
-            style={{ background: "var(--color-danger-bg)", border: "1px solid rgba(199,27,0,0.18)" }}
+            style={{
+              background: "var(--color-danger-bg)",
+              border: "1px solid rgba(199,27,0,0.18)",
+            }}
           >
             {captureError}
           </div>
@@ -308,8 +305,7 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
         </div>
 
         <div className="font-jp text-[11px] text-ink-500">
-          選択中:{" "}
-          <span className="font-semibold text-ink-900">{regionLabel(activeRegion)}</span> —
+          選択中: <span className="font-semibold text-ink-900">{regionLabel(activeRegion)}</span> —
           画像上をドラッグして矩形を指定。確定すると次の領域へ進みます。
         </div>
 

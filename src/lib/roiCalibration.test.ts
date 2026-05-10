@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  REGION_DEFS,
-  countRoi,
-  getRegionRect,
-  hasAnyRoi,
-  setRegionRect,
-} from "./roiCalibration";
+import { REGION_DEFS, countRoi, getRegionRect, hasAnyRoi, setRegionRect } from "./roiCalibration";
 import { EMPTY_ROI_CALIBRATION, type RoiCalibration } from "@/types";
 
 const SAMPLE = { x: 0.1, y: 0.2, w: 0.3, h: 0.4 };
