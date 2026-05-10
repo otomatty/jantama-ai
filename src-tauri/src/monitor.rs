@@ -209,6 +209,12 @@ pub fn start<R: Runtime>(
     // 監視スレッドへ持ち込む。
     let mortal_model_path_for_thread = mortal_model_path.clone();
     // 同様に、recognition の frame request に乗せるため監視スレッドへ持ち込む。
+    //
+    // TODO(future): 監視中に ROI を更新したいユースケース (キャリブレーションを
+    // 微調整しながら結果を見たい) では、`Arc<Mutex<RoiCalibration>>` または
+    // `Arc<ArcSwap<RoiCalibration>>` に切り替えて、設定保存時にホットスワップ
+    // できるようにする。MVP は「停止 → ROI 編集 → 再開」で運用する想定なので
+    // ひとまず clone で固定する (gemini review on PR #42)。
     let roi_for_thread = roi_calibration.clone();
 
     let join = std::thread::spawn(move || {

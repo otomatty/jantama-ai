@@ -8,7 +8,14 @@ import { cn } from "@/lib/utils";
 interface SettingsScreenProps {
   initialSettings: AppSettings;
   onBack: () => void;
-  onOpenCalibration: () => void;
+  /**
+   * キャリブレーション画面を開く際のコールバック。設定画面で編集中の値を
+   * 永続化したあとに呼ばれ、`current` には clamp 等を適用済みの最新 settings が
+   * 入る。App 側はこれを使って親 state を更新してから CalibrationScreen を
+   * 描画する (= 古い state.settings がキャリブレーションに渡って ROI 保存時に
+   * クロバーされるバグを防ぐ。Codex P1 on PR #42)。
+   */
+  onOpenCalibration: (current: AppSettings) => void;
   onSaved: (next: AppSettings) => void;
 }
 
@@ -121,7 +128,11 @@ export function SettingsScreen({
       // 永続化失敗してもキャリブレーション自体は実行可能。エラーだけ通知して続行。
       setSaveError("設定の保存に失敗しました (キャリブレーションは続行できます)");
     }
-    onOpenCalibration();
+    // 親 (App) に現在の設定を引き継いでから遷移する。これがないと、
+    // キャリブレーション画面が古い state.settings を握ったまま onSaved で
+    // 古い値ごと上書きしてしまう (Codex P1)。永続化が失敗しても、メモリ上の
+    // 編集値はキャリブレーションに渡してそこで復元できるようにする。
+    onOpenCalibration(normalized);
   };
 
   const roiCount = countRoi(settings.roi_calibration);

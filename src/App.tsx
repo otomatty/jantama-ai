@@ -99,7 +99,13 @@ function App() {
       <SettingsScreen
         initialSettings={state.settings}
         onBack={() => setScreen("main")}
-        onOpenCalibration={() => setScreen("calibration")}
+        onOpenCalibration={(current) => {
+          // 設定画面が永続化した最新値を親 state に反映してから遷移する。
+          // これがないと CalibrationScreen が古い settings を見て onSaved で
+          // クロバーする (Codex P1 on PR #42)。
+          setSettings(current);
+          setScreen("calibration");
+        }}
         onSaved={(next) => {
           setSettings(next);
           setPhase(

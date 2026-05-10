@@ -38,8 +38,16 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
   const [capture, setCapture] = useState<Capture | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  // ドラッグの実体は ref に持たせて mousemove 中の re-render コストを抑える。
+  // 描画用には `drag` ステートが要るが、ここは tick で region 切り替えと
+  // 終了タイミングだけを伝え、座標は ref から読む。
+  const dragRef = useRef<DragState | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  // refs that read the latest state without retriggering the drag effect.
+  const activeRegionRef = useRef(activeRegion);
+  activeRegionRef.current = activeRegion;
 
   const requestCapture = useCallback(async () => {
     setCapturing(true);
@@ -64,71 +72,64 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
     void requestCapture();
   }, [requestCapture]);
 
-  const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  // canvas 内で押されたら drag を開始するだけ。座標は ref と state の両方に
+  // 書き込む (ref = 手元の真実、state = 描画用)。
+  // mousemove / mouseup は drag 開始後に window レベルで 1 度だけ登録するため、
+  // ドラッグ中に listener が再登録される回数は 0 (= 重複発火 / 再登録コスト無し)。
+  const onCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!capture || !canvasRef.current) return;
     e.preventDefault();
     const rect = canvasRef.current.getBoundingClientRect();
-    const point = {
-      x: clamp01((e.clientX - rect.left) / rect.width) * rect.width,
-      y: clamp01((e.clientY - rect.top) / rect.height) * rect.height,
-    };
-    setDrag({
-      region: activeRegion,
+    const point = pointFromMouseEvent(e.clientX, e.clientY, rect);
+    const next: DragState = {
+      region: activeRegionRef.current,
       start: point,
       current: point,
-    });
+    };
+    dragRef.current = next;
+    setDrag(next);
   };
 
-  const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!drag || !canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    setDrag({
-      ...drag,
-      current: {
-        x: clamp01((e.clientX - rect.left) / rect.width) * rect.width,
-        y: clamp01((e.clientY - rect.top) / rect.height) * rect.height,
-      },
-    });
-  };
-
-  const onMouseUp = (_e: React.MouseEvent<HTMLDivElement>) => {
-    if (!drag || !canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const ratio = rectToRatio(drag.start, drag.current, rect.width, rect.height);
-    setDrag(null);
-    if (!ratio) return;
-    setCalibration((prev) => setRegionRect(prev, drag.region, ratio));
-    // 連続入力で次の領域へ自動的に進ませると操作が分断されにくい。最後の項目で
-    // 止まる挙動はそのまま (= 「全部終わった」ことが見て分かる)。
-    const idx = REGION_DEFS.findIndex((r) => r.id === drag.region);
-    if (idx >= 0 && idx + 1 < REGION_DEFS.length) {
-      setActiveRegion(REGION_DEFS[idx + 1].id);
-    }
-  };
-
-  // ドラッグ中にキャンバス外で離した場合に取り残されないよう
-  // window レベルで mouseup を拾う。state を握っているのは React 側なので
-  // useEffect で listener を登録する。
+  // window レベルの mousemove / mouseup を「ドラッグ中だけ」登録する。
+  // 依存は `drag !== null` の boolean のみにし、座標が動くたびの再登録を避ける。
+  // ハンドラ内では座標は dragRef から読み、state は描画反映用に都度 setDrag する。
+  // mouseup を window レベルに一本化することで、(1) canvas 外で離してもドラッグが
+  // 終わる、(2) canvas onMouseUp との重複発火による activeRegion の二重前進が起きない。
+  const isDragging = drag !== null;
   useEffect(() => {
-    if (!drag) return;
-    const onWindowMouseUp = () => {
-      if (!canvasRef.current) {
-        setDrag(null);
-        return;
-      }
+    if (!isDragging) return;
+    const onWindowMouseMove = (e: MouseEvent) => {
+      const dragNow = dragRef.current;
+      if (!dragNow || !canvasRef.current) return;
       const rect = canvasRef.current.getBoundingClientRect();
-      const ratio = rectToRatio(drag.start, drag.current, rect.width, rect.height);
+      const point = pointFromMouseEvent(e.clientX, e.clientY, rect);
+      const next = { ...dragNow, current: point };
+      dragRef.current = next;
+      setDrag(next);
+    };
+    const onWindowMouseUp = () => {
+      const dragAtEnd = dragRef.current;
+      dragRef.current = null;
       setDrag(null);
+      if (!dragAtEnd || !canvasRef.current) return;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const ratio = rectToRatio(dragAtEnd.start, dragAtEnd.current, rect.width, rect.height);
       if (!ratio) return;
-      setCalibration((prev) => setRegionRect(prev, drag.region, ratio));
-      const idx = REGION_DEFS.findIndex((r) => r.id === drag.region);
+      setCalibration((prev) => setRegionRect(prev, dragAtEnd.region, ratio));
+      // 連続入力で次の領域へ自動的に進ませると操作が分断されにくい。最後の項目で
+      // 止まる挙動はそのまま (= 「全部終わった」ことが見て分かる)。
+      const idx = REGION_DEFS.findIndex((r) => r.id === dragAtEnd.region);
       if (idx >= 0 && idx + 1 < REGION_DEFS.length) {
         setActiveRegion(REGION_DEFS[idx + 1].id);
       }
     };
+    window.addEventListener("mousemove", onWindowMouseMove);
     window.addEventListener("mouseup", onWindowMouseUp);
-    return () => window.removeEventListener("mouseup", onWindowMouseUp);
-  }, [drag]);
+    return () => {
+      window.removeEventListener("mousemove", onWindowMouseMove);
+      window.removeEventListener("mouseup", onWindowMouseUp);
+    };
+  }, [isDragging]);
 
   const handleClear = (region: RoiRegionId) => {
     setCalibration((prev) => setRegionRect(prev, region, null));
@@ -276,9 +277,7 @@ export function CalibrationScreen({ settings, onBack, onSaved }: CalibrationScre
         {/* キャンバス */}
         <div
           ref={canvasRef}
-          onMouseDown={onMouseDown}
-          onMouseMove={onMouseMove}
-          onMouseUp={onMouseUp}
+          onMouseDown={onCanvasMouseDown}
           className="relative aspect-video w-full select-none overflow-hidden rounded-md border border-ink-200 bg-ink-50"
           style={{
             backgroundImage: capture ? `url(${capture.imageDataUrl})` : undefined,
@@ -376,6 +375,22 @@ function regionLabel(region: RoiRegionId): string {
 function clamp01(v: number): number {
   if (Number.isNaN(v)) return 0;
   return Math.max(0, Math.min(1, v));
+}
+
+/**
+ * マウス座標を canvas 内の CSS px へ写像し、はみ出しは canvas 端にクランプする。
+ * window レベルの mousemove は canvas 外でも発火するため、ratio が 0..1 を超えない
+ * ようここで吸収しておく (rectToRatio 側でも clamp はしているが、二重防御)。
+ */
+function pointFromMouseEvent(
+  clientX: number,
+  clientY: number,
+  rect: { left: number; top: number; width: number; height: number },
+): { x: number; y: number } {
+  return {
+    x: clamp01((clientX - rect.left) / rect.width) * rect.width,
+    y: clamp01((clientY - rect.top) / rect.height) * rect.height,
+  };
 }
 
 /**
