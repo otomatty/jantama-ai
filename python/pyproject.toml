@@ -10,6 +10,10 @@ dependencies = [
     "opencv-python>=4.10",
     "pillow>=10.4",
     "pydantic>=2.7",
+    # issue #12: 局名 / 点棒 / 巡目の数字・テキスト認識用。Tesseract 本体は
+    # 別途インストール必須 (Windows は UB Mannheim ビルド推奨)。binary 不在時は
+    # ocr_recognizer.py が graceful に degrade する。
+    "pytesseract>=0.3",
 ]
 
 [project.optional-dependencies]

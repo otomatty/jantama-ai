@@ -69,6 +69,8 @@ function normalizeSettings(raw: AppSettings): AppSettings {
       },
       round_info: roi.round_info ?? null,
       self_wind: roi.self_wind ?? null,
+      scores: roi.scores ?? null,
+      turn_counter: roi.turn_counter ?? null,
     },
   };
 }

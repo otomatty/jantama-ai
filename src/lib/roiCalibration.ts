@@ -27,6 +27,8 @@ export const REGION_DEFS: readonly RoiRegionDef[] = [
   { id: "river_left", label: "河 (上家)" },
   { id: "round_info", label: "場況" },
   { id: "self_wind", label: "自風" },
+  { id: "scores", label: "点棒" },
+  { id: "turn_counter", label: "巡目" },
 ] as const;
 
 /** 指定領域の rect を取得する。未指定なら `null`。 */
@@ -40,6 +42,10 @@ export function getRegionRect(calibration: RoiCalibration, region: RoiRegionId):
       return calibration.round_info;
     case "self_wind":
       return calibration.self_wind;
+    case "scores":
+      return calibration.scores;
+    case "turn_counter":
+      return calibration.turn_counter;
     case "river_self":
       return calibration.rivers.self;
     case "river_right":
@@ -71,6 +77,10 @@ export function setRegionRect(
       return { ...calibration, round_info: rect };
     case "self_wind":
       return { ...calibration, self_wind: rect };
+    case "scores":
+      return { ...calibration, scores: rect };
+    case "turn_counter":
+      return { ...calibration, turn_counter: rect };
     case "river_self":
       return { ...calibration, rivers: { ...calibration.rivers, self: rect } };
     case "river_right":

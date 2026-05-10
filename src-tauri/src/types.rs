@@ -67,7 +67,11 @@ pub struct RiverRois {
     pub left: Option<RoiRect>,
 }
 
-/// 認識用 ROI キャリブレーション (issue #10)。
+/// 認識用 ROI キャリブレーション (issue #10 / #12)。
+///
+/// issue #12 で `scores` (4 家分の点棒を 1 つの領域に並べた帯) と
+/// `turn_counter` (巡目カウンタの数字) を追加。いずれも `#[serde(default)]`
+/// なので旧 settings.json (これらフィールド欠落) でも `None` で読み戻せる。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoiCalibration {
     #[serde(default)]
@@ -80,6 +84,10 @@ pub struct RoiCalibration {
     pub round_info: Option<RoiRect>,
     #[serde(default)]
     pub self_wind: Option<RoiRect>,
+    #[serde(default)]
+    pub scores: Option<RoiRect>,
+    #[serde(default)]
+    pub turn_counter: Option<RoiRect>,
 }
 
 fn default_show_llm_reason() -> bool {
@@ -220,6 +228,22 @@ mod tests {
         assert!(parsed.roi_calibration.hand.is_none());
         assert!(parsed.roi_calibration.rivers.self_seat.is_none());
         assert!(parsed.roi_calibration.rivers.right.is_none());
+    }
+
+    /// issue #12: scores / turn_counter フィールドが旧 settings.json (これらが
+    /// 存在しない) からも `None` で読み戻せる (#[serde(default)] のレグレッション)。
+    #[test]
+    fn roi_calibration_deserializes_without_scores_and_turn_counter() {
+        let legacy = serde_json::json!({
+            "hand": null,
+            "doras": null,
+            "rivers": {},
+            "round_info": null,
+            "self_wind": null,
+        });
+        let parsed: RoiCalibration = serde_json::from_value(legacy).expect("legacy parse");
+        assert!(parsed.scores.is_none());
+        assert!(parsed.turn_counter.is_none());
     }
 
     /// issue #10: river 領域のキーは `self` で永続化される

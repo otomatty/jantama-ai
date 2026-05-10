@@ -6,8 +6,10 @@ stdout に `{"type": "result", "id": <int>, "tenhou_json": {...},
 "confidence": <float>}` を返す。
 
 issue #11: 手牌領域 (`roi_calibration.hand`) を OpenCV テンプレートマッチング
-で 13(+1) 牌に分解する。河 / ドラ / 場況などは別 issue で順次本物に置き換え
-られる予定で、それまでは `stub_tenhou_json()` が仮値を供給する。
+で 13(+1) 牌に分解する。
+issue #12: ドラ表示牌・自風・場風・局名・巡目・点棒を BoardRecognizer がまとめて
+認識する (各サブ認識器は graceful degrade で必須フィールドの既定値を返す)。
+河 / 副露などはまだ別 issue (#13, #14)。
 
 - `--echo`: 受信した内容をそのままエコーバック (デバッグ用)
 """
@@ -25,33 +27,28 @@ import cv2
 import numpy as np
 
 from common import read_request, setup_stderr_logging, write_response
-from recognition.tile_recognizer import RoiRect, TileRecognizer
+from recognition.board_recognizer import DEFAULT_TENHOU_JSON, BoardRecognizer
 
 logger = setup_stderr_logging("recognition")
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
-_recognizer: TileRecognizer | None = None
+_recognizer: BoardRecognizer | None = None
 
 
-def _get_recognizer() -> TileRecognizer:
+def _get_recognizer() -> BoardRecognizer:
     global _recognizer
     if _recognizer is None:
-        _recognizer = TileRecognizer(_TEMPLATE_DIR)
+        _recognizer = BoardRecognizer(_TEMPLATE_DIR)
     return _recognizer
 
 
 def stub_tenhou_json() -> dict[str, Any]:
-    """`hand` 以外のフィールド用のスタブ値。後続 issue で順次置き換わる。"""
-    return {
-        "hand": [],
-        "river": [],
-        "dora_indicators": ["5p"],
-        "self_wind": "東",
-        "round_wind": "東",
-        "turn": 6,
-        "scores": [25000, 25000, 25000, 25000],
-        "melds": [],
-    }
+    """全フィールド認識失敗時の最終フォールバック値。
+
+    issue #12 以降、各フィールドは個別に認識される (BoardRecognizer)。
+    この関数は「フレームデコード失敗」など全認識が走らなかった例外路で使う。
+    """
+    return dict(DEFAULT_TENHOU_JSON)
 
 
 def _decode_frame(image_b64: Any) -> np.ndarray | None:
@@ -81,14 +78,9 @@ def handle_frame(req: dict[str, Any]) -> dict[str, Any]:
         bgr = _decode_frame(req.get("image_b64"))
         if bgr is not None:
             roi_calib = req.get("roi_calibration") or {}
-            hand_roi = RoiRect.from_dict(
-                roi_calib.get("hand") if isinstance(roi_calib, dict) else None
-            )
-            tiles, conf = _get_recognizer().recognize_hand(bgr, hand_roi)
-            tenhou_json["hand"] = tiles
-            confidence = conf
+            tenhou_json, confidence = _get_recognizer().recognize(bgr, roi_calib)
     except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
-        logger.warning("hand recognition failed for id=%s", frame_id, exc_info=True)
+        logger.warning("board recognition failed for id=%s", frame_id, exc_info=True)
 
     return {
         "type": "result",
