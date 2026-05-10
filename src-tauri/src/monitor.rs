@@ -1147,7 +1147,10 @@ mod tests {
         assert!(cleaned.rivers.right.is_none(), "x+w > 1.0 must be dropped");
         assert!(cleaned.round_info.is_some());
         assert!(cleaned.self_wind.is_none());
-        assert!(cleaned.scores.is_none(), "scores with negative x must be dropped");
+        assert!(
+            cleaned.scores.is_none(),
+            "scores with negative x must be dropped"
+        );
         assert!(cleaned.turn_counter.is_some());
     }
 }

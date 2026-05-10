@@ -40,7 +40,8 @@ def _get_pytesseract():  # type: ignore[no-untyped-def]
         return _PYTESSERACT.module
     _PYTESSERACT.tried = True
     try:
-        import pytesseract  # noqa: PLC0415 — lazy import で起動時の依存性を緩める
+        # pytesseract は py.typed なし → mypy stubs 無視 (型情報は使わない動的呼び出し)。
+        import pytesseract  # type: ignore[import-untyped]  # noqa: PLC0415
     except ImportError as exc:
         _PYTESSERACT.error = str(exc)
         logger.warning(
