@@ -23,7 +23,7 @@ from recognition.tile_recognizer import (
     RoiRect,
     TileRecognizer,
 )
-from recognition.wind_recognizer import WindRecognizer
+from recognition.wind_recognizer import WIND_MATCH_THRESHOLD, WindRecognizer
 
 TMPL_H = 32
 TMPL_W = 24
@@ -167,6 +167,26 @@ def test_wind_recognizer_matches_known_label(tmp_path: Path) -> None:
     label, conf = rec.recognize(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
     assert label == "南"
     assert conf > 0.99
+
+
+def test_wind_recognizer_rejects_low_confidence_match(tmp_path: Path) -> None:
+    """Codex P1 on PR #44: NCC < WIND_MATCH_THRESHOLD なら None を返す。
+
+    全テンプレと無相関な画像 (= 全テンプレで違うシードのノイズ) を投げて、
+    どのテンプレとも 0.5+ で一致せず最良スコアでも閾値未満になることを確認。
+    """
+    assert WIND_MATCH_THRESHOLD > 0.0  # 「閾値ゼロ」の退行を防ぐ
+    winds = tmp_path / "winds"
+    _write_all_wind_templates(winds)
+    rec = WindRecognizer(winds)
+
+    # _make_pattern(1000..1003) がテンプレ。9999 は全テンプレと無相関のはず。
+    unrelated_gray = _make_pattern(9999)
+    bgr = cv2.cvtColor(unrelated_gray, cv2.COLOR_GRAY2BGR)
+    label, conf = rec.recognize(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
+    assert label is None, f"low-confidence match (conf={conf}) should return None"
+    # 失敗扱いだが、スコアは返している (デバッグ用途)。
+    assert conf < WIND_MATCH_THRESHOLD
 
 
 def test_wind_recognizer_no_roi_warns_once(

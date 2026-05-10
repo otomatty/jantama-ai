@@ -28,6 +28,14 @@ _WIND_LABEL_MAP: dict[str, str] = {
     "north": "北",
 }
 
+# NCC (cv2.TM_CCOEFF_NORMED) スコアの下限。これ未満なら「自信なし」として `None` を返す。
+# 4 種から「相対的に最良」だけで採用すると、ROI が画面の無関係領域 (背景・牌画像など)
+# に当たっているフレームでも 0.0〜0.3 程度の弱マッチで仮の風が返ってしまい、
+# `BoardRecognizer` 側の scores ゲートを誤って通過させる (Codex P1 on PR #44)。
+# 雀魂の固定フォント + ROI が概ね合っていれば実マッチは 0.7+ になる想定。
+# 0.5 で「相対最良 + 絶対しきい値」の二重チェックにする。
+WIND_MATCH_THRESHOLD = 0.5
+
 
 class WindRecognizer:
     """4 種の風ラベルテンプレを 1 度だけロードして使い回す。"""
@@ -131,4 +139,8 @@ class WindRecognizer:
 
         if best_key is None:
             return None, 0.0
+        # 信頼度しきい値: 「相対的に一番マシ」だけでは ROI ずれフレームで誤検出する
+        # (Codex P1 on PR #44)。NCC < WIND_MATCH_THRESHOLD なら fail-closed。
+        if best_score < WIND_MATCH_THRESHOLD:
+            return None, best_score
         return _WIND_LABEL_MAP[best_key], best_score
