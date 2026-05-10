@@ -4,9 +4,11 @@
 // JSON-lines 通信を行う。recognition / mortal の 2 プロセスを管理。
 
 use crate::types::InferenceBackend;
+use chrono::Utc;
+use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -15,9 +17,9 @@ use std::time::{Duration, Instant};
 // debug ビルドでは未使用となるため条件付きで取り込む。
 #[cfg(not(debug_assertions))]
 use tauri::Manager;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum PythonProcError {
@@ -45,6 +47,15 @@ enum ReaderEvent {
     Io(std::io::Error),
 }
 
+/// stderr 1 行に保持するバイト数の上限 (64 KiB)。
+///
+/// `read_until(b'\n', ..)` を素朴に使うと、改行を含まない巨大入力 (壊れた
+/// 子プロセスや 1 行 GiB 級のスタックダンプ等) でバッファが青天井に膨らみ
+/// アプリが OOM する。Python `logging` の通常レコードは数百〜数 KiB なので
+/// 64 KiB を超えたら以降を破棄して次の改行までスキップし、当該行は
+/// `[truncated]` を末尾に付けて流す (CodeRabbit on PR #41)。
+const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
+
 /// reader→consumer チャネルの上限。
 ///
 /// 元実装は `read_line` を consumer スレッドが直接呼んでいたため、OS の pipe
@@ -61,6 +72,29 @@ enum ReaderEvent {
 /// 偽タイムアウトを誘発する (Codex P1) ので採らない。
 const READER_QUEUE_BOUND: usize = 64;
 
+/// stderr の 1 ログレコードを構造化したペイロード。
+///
+/// Python 側 (`common/logging_setup.py`) は
+/// `{level}\t{logger}\t{message}` の TSV を 1 行 1 レコードで吐くので、
+/// それを Rust 側でパースしてこの構造体に詰め、Tauri Event `python-log`
+/// としてフロントへ流す。`source` は監視ループから見たプロセス識別子
+/// (`recognition` / `mortal` 等)。`timestamp` は受信時刻 (RFC3339)。
+#[derive(Debug, Clone, Serialize)]
+pub struct PythonLogEvent {
+    pub source: String,
+    pub level: String,
+    pub logger: String,
+    pub message: String,
+    pub timestamp: String,
+}
+
+/// stderr reader が 1 ログレコードを受け取るたびに呼ばれるコールバック。
+///
+/// `spawn_recognition` / `spawn_mortal` から `AppHandle::emit` を呼ぶ
+/// クロージャを差し込んで `python-log` イベントとしてフロントへ流す想定。
+/// テストや Tauri を持たないコンテキストからは `None` を渡せばよい。
+pub type PythonLogEmitter = Box<dyn Fn(PythonLogEvent) + Send + Sync + 'static>;
+
 pub struct PythonProcess {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
@@ -69,6 +103,9 @@ pub struct PythonProcess {
     rx: Mutex<Receiver<ReaderEvent>>,
     /// reader スレッドのハンドル。`kill` 時に join するため保持する。
     reader_join: Mutex<Option<JoinHandle<()>>>,
+    /// stderr を構造化ログとして取り込む reader スレッドのハンドル。
+    /// `kill` 時に join するため保持する。
+    stderr_join: Mutex<Option<JoinHandle<()>>>,
     /// 送信→受信を 1 つのトランザクションとして直列化するためのロック。
     /// stdin / stdout のロックは個別なので、複数スレッドが
     /// `send_line` → `recv_line` を呼ぶと別スレッドの応答を
@@ -90,6 +127,7 @@ impl PythonProcess {
         program: &Path,
         args: &[&str],
         cwd: Option<&Path>,
+        log_emitter: Option<PythonLogEmitter>,
     ) -> Result<Self, PythonProcError> {
         let label = label.into();
         info!(
@@ -105,9 +143,11 @@ impl PythonProcess {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // stderr は read しないため pipe するとバッファ満杯でデッドロックし得る。
-            // Phase D で構造化ログとして取り込むまでは親プロセスへ継承する。
-            .stderr(Stdio::inherit());
+            // stderr は専用 reader スレッドで吸い続けるので pipe しても
+            // バッファ満杯デッドロックは起きない。`stderr_loop` が
+            // BufReader::read_line で 1 行ずつ取り出して tracing と
+            // Tauri Event `python-log` に流す。
+            .stderr(Stdio::piped());
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
@@ -122,6 +162,10 @@ impl PythonProcess {
             .stdout
             .take()
             .ok_or_else(|| PythonProcError::NotFound("stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| PythonProcError::NotFound("stderr".into()))?;
 
         let (tx, rx) = mpsc::sync_channel::<ReaderEvent>(READER_QUEUE_BOUND);
         let label_for_thread = label.clone();
@@ -129,11 +173,17 @@ impl PythonProcess {
             reader_loop(stdout, tx, label_for_thread);
         });
 
+        let label_for_stderr = label.clone();
+        let stderr_join = std::thread::spawn(move || {
+            stderr_loop(stderr, label_for_stderr, log_emitter);
+        });
+
         Ok(Self {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             rx: Mutex::new(rx),
             reader_join: Mutex::new(Some(reader_join)),
+            stderr_join: Mutex::new(Some(stderr_join)),
             roundtrip: Mutex::new(()),
             label,
         })
@@ -305,6 +355,13 @@ impl PythonProcess {
                 let _ = join.join();
             }
         }
+        // child が落ちると stderr も EOF になり stderr_loop が抜ける。
+        // emitter (Tauri Event 送信) は同期的に動くだけなので join はすぐ戻る。
+        if let Ok(mut join_opt) = self.stderr_join.lock() {
+            if let Some(join) = join_opt.take() {
+                let _ = join.join();
+            }
+        }
     }
 
     /// recognition プロセスを高レベル API で起動する。
@@ -312,7 +369,14 @@ impl PythonProcess {
     pub fn spawn_recognition<R: Runtime>(app: &AppHandle<R>) -> Result<Self, PythonProcError> {
         let cmd = resolve_python_command(app, "recognition")?;
         let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-        Self::spawn("recognition", &cmd.program, &arg_refs, cmd.cwd.as_deref())
+        let emitter = make_tauri_log_emitter(app);
+        Self::spawn(
+            "recognition",
+            &cmd.program,
+            &arg_refs,
+            cmd.cwd.as_deref(),
+            Some(emitter),
+        )
     }
 
     /// mortal プロセスを高レベル API で起動する。
@@ -339,8 +403,41 @@ impl PythonProcess {
             cmd.args.push(model_path.to_string());
         }
         let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-        Self::spawn("mortal", &cmd.program, &arg_refs, cmd.cwd.as_deref())
+        let emitter = make_tauri_log_emitter(app);
+        Self::spawn(
+            "mortal",
+            &cmd.program,
+            &arg_refs,
+            cmd.cwd.as_deref(),
+            Some(emitter),
+        )
     }
+}
+
+/// `AppHandle::emit` を呼ぶだけの汎用 emitter を組み立てる。
+/// Tauri 側の emit が失敗した場合 (フロントが居ない / シャットダウン中等) は
+/// 警告ログだけ残してそのまま握りつぶす — Python 側のログ流入を止めない。
+///
+/// 連続失敗中 (フロント未接続 / 永続シャットダウン等) は最初の 1 回だけ
+/// `warn!` で残し、以降は `debug!` に格下げする。Python が高頻度ログを
+/// 流す状況で warning が洪水を起こすのを避けるため (CodeRabbit on PR #41)。
+/// emit が再び成功したらフラグをリセットして次回の失敗を再度 `warn!` する。
+fn make_tauri_log_emitter<R: Runtime>(app: &AppHandle<R>) -> PythonLogEmitter {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let app = app.clone();
+    let warned = AtomicBool::new(false);
+    Box::new(move |event| match app.emit("python-log", &event) {
+        Ok(()) => {
+            warned.store(false, Ordering::Relaxed);
+        }
+        Err(e) => {
+            if !warned.swap(true, Ordering::Relaxed) {
+                warn!(target: "python_proc", "emit python-log failed: {}", e);
+            } else {
+                debug!(target: "python_proc", "emit python-log still failing: {}", e);
+            }
+        }
+    })
 }
 
 /// stdout を 1 行ずつ読み、`tx` へイベントとして流す reader スレッド本体。
@@ -373,6 +470,204 @@ fn reader_loop(stdout: ChildStdout, tx: mpsc::SyncSender<ReaderEvent>, label: St
         }
     }
     debug!(target: "python_proc", "[{}] reader thread exited", label);
+}
+
+/// stderr を 1 行ずつ読み、構造化ログとして tracing と Tauri Event に流す。
+///
+/// Python 側 (`common/logging_setup.py`) は `{level}\t{logger}\t{message}`
+/// の TSV を 1 行 = 1 レコードで吐く前提。フォーマットに合わない行 (Python
+/// 起動前の Tracing や子プロセスが直接 stderr に書く非構造ログ等) は
+/// `INFO` 扱いで `message` にそのまま積む。
+///
+/// child が死ぬと stderr が EOF になりループを抜ける。送り先の emitter は
+/// 同期呼び出しなので、ループは BufReader が次の行を読み取る速度で進む =
+/// pipe バッファが詰まることはない (= デッドロック対策)。
+///
+/// バイト列で読んでから `String::from_utf8_lossy` で文字列化する点に注意。
+/// `BufRead::lines()` は invalid UTF-8 を `Err` で返すので、Windows / 非
+/// UTF-8 ロケールの Python が CP932 等を吐くとそこで reader スレッドが
+/// 落ちて stderr の drain が止まり、結果的に pipe バッファが詰まって child が
+/// ハングする (Codex P1 on PR #41)。U+FFFD 置換に倒して drain を継続する。
+///
+/// 1 行のサイズは `MAX_STDERR_LINE_BYTES` で打ち切る。
+/// 巨大行 (改行無し / 暴走サブプロセス) で OOM しないため
+/// (CodeRabbit on PR #41)。打ち切り時は `[truncated]` を付けて次の改行まで
+/// バイトを捨てる。
+fn stderr_loop(stderr: ChildStderr, label: String, emitter: Option<PythonLogEmitter>) {
+    let mut reader = BufReader::new(stderr);
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    loop {
+        buf.clear();
+        let outcome = match read_capped_line(&mut reader, &mut buf, MAX_STDERR_LINE_BYTES) {
+            Ok(o) => o,
+            Err(e) => {
+                // OS レベルの I/O 失敗 (pipe が壊れた等)。ここまで来たら
+                // 続きを読む手段が無いので素直に抜ける。
+                debug!(
+                    target: "python_proc",
+                    "[{}] stderr read error: {}",
+                    label, e
+                );
+                break;
+            }
+        };
+        if matches!(outcome, ReadOutcome::Eof) && buf.is_empty() {
+            break;
+        }
+        // 末尾の改行 (\n / \r\n) を取り除く。
+        while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
+            buf.pop();
+        }
+        let truncated = matches!(outcome, ReadOutcome::Truncated);
+        if buf.is_empty() && !truncated {
+            // EOF 直前の空行や、純粋な空行はスキップする。
+            if matches!(outcome, ReadOutcome::Eof) {
+                break;
+            }
+            continue;
+        }
+        // invalid UTF-8 は U+FFFD に置換して握りつぶす (drain を止めない)。
+        let mut line = String::from_utf8_lossy(&buf).into_owned();
+        if truncated {
+            line.push_str(" [truncated]");
+        }
+        let (level, logger, message) = parse_log_line(&line);
+        // tracing の target はマクロ展開時に決まる &'static str しか
+        // 受け取れないので、source / logger は構造化フィールドで渡す。
+        match level.as_str() {
+            "DEBUG" => debug!(
+                target: "python_log",
+                source = %label,
+                logger = %logger,
+                "{}",
+                message
+            ),
+            "WARNING" | "WARN" => warn!(
+                target: "python_log",
+                source = %label,
+                level = %level,
+                logger = %logger,
+                "{}",
+                message
+            ),
+            // ERROR/CRITICAL/FATAL は tracing 側でも error! 相当の重み付けで
+            // 残すことで、後段のフィルタ/アラートが Python 由来のエラーを
+            // 拾えるようにする (Codex P2 on PR #41)。
+            "ERROR" | "CRITICAL" | "FATAL" => error!(
+                target: "python_log",
+                source = %label,
+                level = %level,
+                logger = %logger,
+                "{}",
+                message
+            ),
+            _ => info!(
+                target: "python_log",
+                source = %label,
+                logger = %logger,
+                "{}",
+                message
+            ),
+        }
+        if let Some(emit) = emitter.as_ref() {
+            emit(PythonLogEvent {
+                source: label.clone(),
+                level,
+                logger,
+                message,
+                timestamp: Utc::now().to_rfc3339(),
+            });
+        }
+    }
+    debug!(target: "python_proc", "[{}] stderr reader thread exited", label);
+}
+
+/// `read_capped_line` の終端理由。`Line` は改行で正常に区切れた行、
+/// `Truncated` は `max_bytes` を超えたので残りを次の改行までスキップした行、
+/// `Eof` は EOF を踏んだ (この場合 buf には末尾の partial line が入り得る)。
+#[derive(Debug, PartialEq, Eq)]
+enum ReadOutcome {
+    Line,
+    Truncated,
+    Eof,
+}
+
+/// `reader` から 1 行 (改行までまたは EOF まで) を `buf` の末尾に追記する。
+///
+/// `max_bytes` を超える分は `buf` には積まず、次の改行までは `consume` だけ
+/// して捨てる (= 巨大行で OOM しないためのガード, CodeRabbit on PR #41)。
+/// `BufRead::fill_buf` を使うことで内部バッファのまま走査できるので、
+/// 1 KiB ずつコピーするよりも効率が良い。
+fn read_capped_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<ReadOutcome> {
+    let start_len = buf.len();
+    let mut overflowed = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(slice) => slice,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            // EOF。partial line が buf に残っていれば呼び出し側で処理する。
+            return Ok(if overflowed {
+                ReadOutcome::Truncated
+            } else {
+                ReadOutcome::Eof
+            });
+        }
+        let nl_pos = available.iter().position(|&b| b == b'\n');
+        let consume_to = nl_pos.map(|p| p + 1).unwrap_or(available.len());
+        if !overflowed {
+            let space = max_bytes.saturating_sub(buf.len() - start_len);
+            let take = consume_to.min(space);
+            buf.extend_from_slice(&available[..take]);
+            if take < consume_to {
+                overflowed = true;
+            }
+        }
+        reader.consume(consume_to);
+        if nl_pos.is_some() {
+            return Ok(if overflowed {
+                ReadOutcome::Truncated
+            } else {
+                ReadOutcome::Line
+            });
+        }
+    }
+}
+
+/// stderr 1 行を `(level, logger, message)` に分解する。
+///
+/// 期待: `{LEVEL}\t{LOGGER}\t{MESSAGE}` の TSV 3 列。
+/// - 3 列に満たない / level が既知のものでない場合: `INFO` / `python` /
+///   行全体 にフォールバックする (Python 起動前の素のエラーや
+///   tauri-plugin の混入 stderr もログに残せる)。
+fn parse_log_line(line: &str) -> (String, String, String) {
+    let mut parts = line.splitn(3, '\t');
+    let raw_level = parts.next().unwrap_or("");
+    let logger = parts.next();
+    let message = parts.next();
+    if let (Some(logger), Some(message)) = (logger, message) {
+        if is_known_level(raw_level) {
+            return (
+                raw_level.to_string(),
+                logger.to_string(),
+                message.to_string(),
+            );
+        }
+    }
+    ("INFO".to_string(), "python".to_string(), line.to_string())
+}
+
+fn is_known_level(s: &str) -> bool {
+    matches!(
+        s,
+        "DEBUG" | "INFO" | "WARNING" | "WARN" | "ERROR" | "CRITICAL" | "FATAL"
+    )
 }
 
 /// `resolve_python_command` の結果。dev では `uv` を `python/` で起動し、
@@ -581,6 +876,7 @@ mod tests {
                 "import sys\nfor line in sys.stdin:\n    sys.stdout.write(line)\n    sys.stdout.flush()\n",
             ],
             None,
+            None,
         )
         .expect("spawn echo python");
 
@@ -611,6 +907,7 @@ mod tests {
                 // ぶら下がるので親側のタイムアウトを試せる。
                 "import sys, time\nfor _ in sys.stdin:\n    time.sleep(60)\n",
             ],
+            None,
             None,
         )
         .expect("spawn silent python");
@@ -645,7 +942,7 @@ mod tests {
                           sys.stdout.write('fresh\\n')\n    \
                           sys.stdout.flush()\n    \
                           break\n";
-        let proc = PythonProcess::spawn("filter", &python, &["-u", "-c", script], None)
+        let proc = PythonProcess::spawn("filter", &python, &["-u", "-c", script], None, None)
             .expect("spawn filter python");
 
         // stale が reader 側に流れ込むまで少し待つ。
@@ -684,7 +981,7 @@ mod tests {
              sys.stdin.read()\n",
             burst
         );
-        let proc = PythonProcess::spawn("burst", &python, &["-u", "-c", &script], None)
+        let proc = PythonProcess::spawn("burst", &python, &["-u", "-c", &script], None, None)
             .expect("spawn burst python");
 
         // Python が書き終わって reader が send で詰まるまで待つ。
@@ -698,6 +995,220 @@ mod tests {
             "kill() should not deadlock; took {:?}",
             elapsed
         );
+    }
+
+    /// `parse_log_line` が TSV 形式を分解し、未知レベルや 3 列に満たない
+    /// 行を `INFO`/`python` フォールバックに倒すことを確認する。
+    #[test]
+    fn parse_log_line_handles_known_and_malformed_inputs() {
+        let (level, logger, message) = parse_log_line("INFO\trecognition\thello");
+        assert_eq!(level, "INFO");
+        assert_eq!(logger, "recognition");
+        assert_eq!(message, "hello");
+
+        let (level, logger, message) = parse_log_line("ERROR\tmortal\tfailed: bad");
+        assert_eq!(level, "ERROR");
+        assert_eq!(logger, "mortal");
+        assert_eq!(message, "failed: bad");
+
+        // 3 列目がさらにタブを含んでも丸ごと message に入る (splitn(3,..))。
+        let (_, _, message) = parse_log_line("INFO\trec\ta\tb\tc");
+        assert_eq!(message, "a\tb\tc");
+
+        // 未知レベル → フォールバック (INFO/python/<line>) で握りつぶす。
+        let (level, logger, message) = parse_log_line("HELLO\tx\ty");
+        assert_eq!(level, "INFO");
+        assert_eq!(logger, "python");
+        assert_eq!(message, "HELLO\tx\ty");
+
+        // タブが無い (素のエラー出力) → フォールバック。
+        let (level, logger, message) = parse_log_line("Traceback (most recent call last):");
+        assert_eq!(level, "INFO");
+        assert_eq!(logger, "python");
+        assert_eq!(message, "Traceback (most recent call last):");
+    }
+
+    /// stderr に書き込まれた構造化行が emitter コールバックへ届くことを
+    /// 確認する。フロント側 `python-log` event の挙動に対するスモーク。
+    #[test]
+    fn stderr_lines_are_routed_to_emitter() {
+        use std::sync::Arc;
+
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+
+        let collected: Arc<Mutex<Vec<PythonLogEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let collected_for_emitter = collected.clone();
+        let emitter: PythonLogEmitter = Box::new(move |evt| {
+            collected_for_emitter.lock().unwrap().push(evt);
+        });
+
+        // 構造化 1 行 + 非構造 1 行を stderr に書いて即終了。
+        let script = "import sys\n\
+                      sys.stderr.write('INFO\\trecognition\\thello world\\n')\n\
+                      sys.stderr.write('plain stderr line\\n')\n\
+                      sys.stderr.flush()\n";
+        let proc = PythonProcess::spawn(
+            "stderr-test",
+            &python,
+            &["-u", "-c", script],
+            None,
+            Some(emitter),
+        )
+        .expect("spawn stderr-test python");
+
+        // child が終わって stderr_loop が EOF まで読み切るのを待つ。
+        // kill() が join するのでここで待ってから kill する。
+        std::thread::sleep(Duration::from_millis(300));
+        proc.kill();
+
+        let events = collected.lock().unwrap();
+        assert!(
+            events.iter().any(|e| e.level == "INFO"
+                && e.logger == "recognition"
+                && e.message == "hello world"
+                && e.source == "stderr-test"),
+            "missing structured event in {:?}",
+            *events
+        );
+        assert!(
+            events.iter().any(|e| e.level == "INFO"
+                && e.logger == "python"
+                && e.message == "plain stderr line"),
+            "missing fallback event in {:?}",
+            *events
+        );
+    }
+
+    /// stderr に invalid UTF-8 (例: CP932 / Shift-JIS バイト列) が混ざっても
+    /// reader が落ちずに後続行を drain し続けることを確認する。
+    /// `BufRead::lines()` 由来の Err 即時 break を `read_until` + `from_utf8_lossy`
+    /// に切り替えたリグレッションテスト (Codex P1 on PR #41)。
+    #[test]
+    fn stderr_continues_draining_after_non_utf8_bytes() {
+        use std::sync::Arc;
+
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+
+        let collected: Arc<Mutex<Vec<PythonLogEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let collected_for_emitter = collected.clone();
+        let emitter: PythonLogEmitter = Box::new(move |evt| {
+            collected_for_emitter.lock().unwrap().push(evt);
+        });
+
+        // 1 行目: 不正 UTF-8 (0x82 0xA0 = Shift-JIS 'あ', UTF-8 では invalid)
+        // 2 行目: 構造化された有効な行
+        // 1 行目で reader が落ちると 2 行目は届かない。
+        let script = "import sys\n\
+                      sys.stderr.buffer.write(b'\\x82\\xa0\\n')\n\
+                      sys.stderr.buffer.write(b'INFO\\trecognition\\tafter-bad-bytes\\n')\n\
+                      sys.stderr.buffer.flush()\n";
+        let proc = PythonProcess::spawn(
+            "non-utf8",
+            &python,
+            &["-u", "-c", script],
+            None,
+            Some(emitter),
+        )
+        .expect("spawn non-utf8 python");
+
+        std::thread::sleep(Duration::from_millis(300));
+        proc.kill();
+
+        let events = collected.lock().unwrap();
+        assert!(
+            events.iter().any(|e| e.message == "after-bad-bytes"
+                && e.level == "INFO"
+                && e.logger == "recognition"),
+            "stderr drain stalled after non-UTF8 line; collected={:?}",
+            *events
+        );
+    }
+
+    /// 巨大行 (改行を含まない or 極端に長いダンプ) で OOM しないこと、
+    /// および打ち切り後も後続行が普通に届くことを確認する
+    /// (CodeRabbit on PR #41)。
+    #[test]
+    fn stderr_truncates_oversized_line_and_keeps_draining() {
+        let mut buf: Vec<u8> = Vec::new();
+        // 上限 16 バイトに対して "AAAA...\nINFO\trec\thi\n" を流す。
+        let mut reader =
+            std::io::BufReader::new(&b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nINFO\trec\thi\n"[..]);
+
+        let outcome = read_capped_line(&mut reader, &mut buf, 16).unwrap();
+        assert_eq!(outcome, ReadOutcome::Truncated);
+        assert!(buf.len() <= 16, "buf grew past cap: {}", buf.len());
+
+        buf.clear();
+        let outcome = read_capped_line(&mut reader, &mut buf, 64).unwrap();
+        assert_eq!(outcome, ReadOutcome::Line);
+        assert_eq!(buf, b"INFO\trec\thi\n");
+
+        buf.clear();
+        let outcome = read_capped_line(&mut reader, &mut buf, 64).unwrap();
+        assert_eq!(outcome, ReadOutcome::Eof);
+        assert!(buf.is_empty());
+    }
+
+    /// 大量の stderr ログ (10000 行) を吐いてもプロセス側がブロックしないことを
+    /// 確認する。issue #9 受け入れ基準。stderr_loop が pipe を継続的に drain
+    /// しているので、Python の stderr write はバッファ満杯で詰まらない。
+    #[test]
+    fn stderr_does_not_deadlock_on_large_log_volume() {
+        use std::sync::Arc;
+
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
+        else {
+            eprintln!("skipping: python3/python not on PATH");
+            return;
+        };
+
+        let counter: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let counter_for_emitter = counter.clone();
+        let emitter: PythonLogEmitter = Box::new(move |_| {
+            *counter_for_emitter.lock().unwrap() += 1;
+        });
+
+        // 10000 行を stderr に流し、stdin の close で終了する。
+        let script = "import sys\n\
+                      for i in range(10000):\n    \
+                          sys.stderr.write(f'INFO\\tflood\\tline-{i}\\n')\n\
+                      sys.stderr.flush()\n\
+                      sys.stdin.read()\n";
+        let proc =
+            PythonProcess::spawn("flood", &python, &["-u", "-c", script], None, Some(emitter))
+                .expect("spawn flood python");
+
+        // stderr_loop が drain し終わるまで待つ。10000 行の処理は数十 ms の想定。
+        let started = Instant::now();
+        loop {
+            if *counter.lock().unwrap() >= 10000 {
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(10) {
+                panic!(
+                    "stderr drain stalled at {} lines (deadlock suspect)",
+                    counter.lock().unwrap()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        proc.kill();
+        assert!(*counter.lock().unwrap() >= 10000);
     }
 
     /// 即終了する Python を相手に `request_line_timeout` が
@@ -715,6 +1226,7 @@ mod tests {
             "dies",
             &python,
             &["-u", "-c", "import sys; sys.exit(0)"],
+            None,
             None,
         )
         .expect("spawn dying python");
