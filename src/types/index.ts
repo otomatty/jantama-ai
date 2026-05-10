@@ -149,3 +149,25 @@ export interface AppError {
   message: string;
   occurred_at: string; // ISO8601
 }
+
+// ============================================================
+// Python サブプロセスからの構造化ログ
+// ============================================================
+
+/**
+ * Rust 側 (`src-tauri/src/python_proc.rs`) が emit する `python-log` の payload。
+ * Python の stderr を `{level}\t{logger}\t{message}` の TSV としてパースした結果。
+ * S-03 デバッグビューでログテーブルを描画する際の入力になる。
+ */
+export interface PythonLogEvent {
+  /** 発生プロセス識別子 (例: "recognition", "mortal") */
+  source: string;
+  /** Python logging の levelname (INFO / WARNING / ERROR / DEBUG など) */
+  level: string;
+  /** logger 名 */
+  logger: string;
+  /** 1 行に正規化されたメッセージ (改行は `\\n` にエスケープ済み) */
+  message: string;
+  /** Rust 側が受信した時刻 (RFC3339) */
+  timestamp: string;
+}
