@@ -578,6 +578,16 @@ fn handle_cycle_error<R: Runtime>(
     };
     match spawn_result {
         Ok(new_proc) => {
+            // spawn_* 中に MonitorHandle::stop() が走った可能性がある。
+            // すでに古い Arc は kill 済みなので、ここで何も考えずに replace すると
+            // 新しいプロセスがどのスロットからも監視されないまま生き残り、
+            // MonitorHandle::Drop の二重 stop() に頼ることになる。stop_flag を
+            // 再確認し、立っていれば新プロセスをここで殺してスロットには戻さない。
+            if stop_flag.load(Ordering::SeqCst) {
+                info!(target: "monitor", "stop requested during {:?} respawn; killing new process", dead);
+                new_proc.kill();
+                return;
+            }
             match dead {
                 DeadProcess::Recognition => rec_slot.replace(new_proc),
                 DeadProcess::Mortal => mortal_slot.replace(new_proc),
