@@ -72,7 +72,7 @@ export function MainScreen({
       <div className="border-t border-ink-200 bg-white px-3 py-3">
         <MonitorButton
           on={state.monitoring.watching}
-          disabled={busy || state.phase === "uninitialized" || state.phase === "error"}
+          disabled={busy || state.phase === "uninitialized"}
           onClick={handleToggleWatching}
         />
       </div>

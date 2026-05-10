@@ -48,12 +48,27 @@ function App() {
         capture_target_window_title: state.settings.capture_target_window_title,
         last_recognized_at: null,
       });
-      if (!watching) {
+      // 監視 ON/OFF どちらの操作も「ユーザーがエラーを了承して仕切り直し」と
+      // みなし、phase=error に張り付かないようリセットする。これがないと
+      // 永続的な recognition-error (例: 対象ウィンドウ最小化) で次の成功推論
+      // が来ない限り MonitorButton 経由で停止できなくなる。
+      setError(null);
+      if (watching) {
+        setPhase("watching_no_board");
+      } else {
         setInference(null);
         setBoard(null);
+        setPhase("idle");
       }
     },
-    [setMonitoring, setInference, setBoard, state.settings.capture_target_window_title],
+    [
+      setMonitoring,
+      setInference,
+      setBoard,
+      setError,
+      setPhase,
+      state.settings.capture_target_window_title,
+    ],
   );
 
   const handleInferenceUpdate = useCallback(

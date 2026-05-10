@@ -66,6 +66,34 @@ describe("MainScreen", () => {
     setTauriEnv(false);
   });
 
+  it("phase=error でも監視 ON 中は停止ボタンを押せる", () => {
+    render(
+      <MainScreen
+        state={{
+          ...INITIAL_APP_STATE,
+          phase: "error",
+          monitoring: {
+            watching: true,
+            capture_target_window_title: "雀魂",
+            last_recognized_at: null,
+          },
+          error: {
+            type: "recognition",
+            message: "window minimized",
+            occurred_at: "2026-01-01T00:00:00Z",
+          },
+        }}
+        onOpenSettings={vi.fn()}
+        onMonitoringChange={vi.fn()}
+        onInferenceUpdate={vi.fn()}
+        onRecognitionError={vi.fn()}
+      />,
+    );
+    // エラー状態でも停止経路を残し、永続的な recognition-error で
+    // 監視ループが UI から止められなくなる (P1) のを防ぐ。
+    expect(screen.getByRole("button", { name: /停止する/ })).not.toBeDisabled();
+  });
+
   it("phase が idle のとき待機メッセージを表示", () => {
     render(
       <MainScreen
