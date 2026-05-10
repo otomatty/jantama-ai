@@ -103,6 +103,11 @@ def _ocr_string(img: np.ndarray, lang: str, whitelist: str) -> str | None:
     pyt = _get_pytesseract()
     if pyt is None:
         return None
+    # binary 未導入と一度確定したら、以降は例外 throw/catch のコストを払わず即 None。
+    # 監視ループで毎フレーム 3 関数 × image_to_string が同じ TesseractNotFoundError を
+    # 投げ続けるのを避ける (CodeRabbit Major on PR #44)。
+    if _PYTESSERACT.error in _TESSERACT_NOT_FOUND_NAMES:
+        return None
     config = f"--psm 7 -c tessedit_char_whitelist={whitelist}"
     try:
         # `image_to_string` の戻り値型は実装上 str。型注釈なしの動的呼び出し。
@@ -110,6 +115,8 @@ def _ocr_string(img: np.ndarray, lang: str, whitelist: str) -> str | None:
     except Exception as exc:  # noqa: BLE001 — Tesseract 不在 / 内部エラーを統一して握る
         name = type(exc).__name__
         if name in _TESSERACT_NOT_FOUND_NAMES:
+            # 警告は初回のみ。`_PYTESSERACT.error` への記録は毎回行い、上の早期 return
+            # が以降のフレームで確実に効くようにする (CodeRabbit Major on PR #44)。
             if _PYTESSERACT.error is None:
                 logger.warning(
                     "Tesseract binary not found (%s); OCR-based fields disabled. "
@@ -117,7 +124,7 @@ def _ocr_string(img: np.ndarray, lang: str, whitelist: str) -> str | None:
                     "(Windows) and ensure it's on PATH.",
                     exc,
                 )
-                _PYTESSERACT.error = name
+            _PYTESSERACT.error = name
         else:
             logger.warning("Tesseract OCR failed (%s): %s", name, exc)
         return None

@@ -344,6 +344,53 @@ def test_round_label_to_wind() -> None:
     assert ocr_recognizer.round_label_to_wind("X1局") is None
 
 
+def test_ocr_short_circuits_after_tesseract_not_found(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CodeRabbit Major on PR #44: TesseractNotFoundError 確定後は image_to_string を再呼びしない。
+
+    監視ループで毎フレーム 3 OCR 関数が例外コストを払うのを避けるための短絡。
+    """
+
+    class _TesseractNotFoundError(Exception):
+        """pytesseract.TesseractNotFoundError と同じクラス名のスタブ例外。"""
+
+    class _NotFoundFake:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def image_to_string(
+            self, img: np.ndarray, lang: str = "eng", config: str = ""
+        ) -> str:  # noqa: ARG002
+            self.calls += 1
+            raise _TesseractNotFoundError("simulated")
+
+    _TesseractNotFoundError.__name__ = "TesseractNotFoundError"
+
+    fake = _NotFoundFake()
+    ocr_recognizer._PYTESSERACT.module = fake
+    ocr_recognizer._PYTESSERACT.tried = True
+    ocr_recognizer._PYTESSERACT.error = None
+
+    bgr = np.full((40, 40, 3), 128, dtype=np.uint8)
+    bgr[5:35, 5:35] = 255
+
+    with caplog.at_level("WARNING", logger="recognition"):
+        # 1 回目: image_to_string が呼ばれ TesseractNotFoundError → エラー状態が記録される
+        assert ocr_recognizer.recognize_turn(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) is None
+        first_call_count = fake.calls
+        assert first_call_count == 1
+        # 2..N 回目: 上の早期 return が効いて image_to_string は呼ばれない
+        for _ in range(5):
+            assert ocr_recognizer.recognize_turn(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) is None
+            assert ocr_recognizer.recognize_round_label(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) is None
+        assert fake.calls == first_call_count, "image_to_string must not be re-invoked"
+
+    # 警告は初回 1 回のみ。
+    warns = [r for r in caplog.records if "Tesseract binary not found" in r.getMessage()]
+    assert len(warns) == 1
+
+
 def test_ocr_disabled_when_pytesseract_missing(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
