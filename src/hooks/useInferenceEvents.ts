@@ -82,15 +82,12 @@ export function useInferenceEvents({
       // 順次登録して部分登録のクリーンアップを担保する。
       let tempInferenceUn: UnlistenFn | null = null;
       try {
-        tempInferenceUn = await listen<InferenceEventPayload>(
-          "inference-result",
-          (event) => {
-            // 監視 OFF と listener 解除の競合で古いイベントが届くことがあるため
-            // コールバック側でも cancelled を確認する
-            if (cancelled) return;
-            onInference(event.payload.inference, event.payload.board ?? null);
-          },
-        );
+        tempInferenceUn = await listen<InferenceEventPayload>("inference-result", (event) => {
+          // 監視 OFF と listener 解除の競合で古いイベントが届くことがあるため
+          // コールバック側でも cancelled を確認する
+          if (cancelled) return;
+          onInference(event.payload.inference, event.payload.board ?? null);
+        });
         if (cancelled) {
           tempInferenceUn();
           return;
