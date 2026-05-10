@@ -213,6 +213,10 @@ pub fn resolve_python_command<R: Runtime>(
     }
     #[cfg(not(debug_assertions))]
     {
+        // Phase F (バンドル) で `jantama-<label>(.exe)` を同梱する想定。
+        // Unix 系ではリソース同梱時に実行ビットが落ちるとここで起動が
+        // "Permission denied" になるため、Phase F のバンドル手順で
+        // 実行ビットを保つ (もしくは Tauri Sidecar に切り替える) こと。
         let resource_dir = app
             .path()
             .resource_dir()
@@ -230,29 +234,20 @@ pub fn resolve_python_command<R: Runtime>(
     }
 }
 
-/// PATH から `uv` 実行ファイルを探す。Windows では `uv.exe` も対象にする。
-/// 見つからない場合は `PythonProcError::NotFound` を返す。
+/// PATH から `uv` 実行ファイルを探す。
+/// `which` クレートに委譲することで OS のプロセス起動と同じ
+/// ルックアップ規則 (Unix の実行ビット、Windows の PATHEXT による
+/// `uv.exe` / `uv.cmd` 等) に従う。手書きの PATH 走査では非実行ファイル
+/// を拾ったり Windows のラッパー (`.cmd`) を見落とす可能性があるため。
 /// dev ビルド (および `cargo test`) でのみ呼び出される。
 #[cfg(debug_assertions)]
 fn find_uv_executable() -> Result<PathBuf, PythonProcError> {
-    let names: &[&str] = if cfg!(windows) {
-        &["uv.exe", "uv"]
-    } else {
-        &["uv"]
-    };
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            for name in names {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-        }
-    }
-    Err(PythonProcError::NotFound(
-        "`uv` が PATH にありません。https://docs.astral.sh/uv/ からインストールしてください".into(),
-    ))
+    which::which("uv").map_err(|e| {
+        PythonProcError::NotFound(format!(
+            "`uv` が PATH にありません ({}). https://docs.astral.sh/uv/ からインストールしてください",
+            e
+        ))
+    })
 }
 
 /// 開発時に `python/pyproject.toml` がある場所を解決する。
@@ -312,7 +307,10 @@ fn redact_for_log(line: &str) -> String {
     value.to_string()
 }
 
-#[cfg(test)]
+// `find_uv_executable` は `debug_assertions` でだけ定義されるため、
+// テストモジュールも同条件でゲートしないと `cargo test --release` で
+// コンパイルエラーになる。
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
 

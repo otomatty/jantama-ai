@@ -34,6 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 base64 = "0.22"
+which = "6"
 
 [features]
 # this feature is used for production builds or when `devUrl` points to the filesystem
