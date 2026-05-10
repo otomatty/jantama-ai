@@ -1,28 +1,49 @@
 """認識プロセスのエントリーポイント。
 
-stdin から `{"type": "frame", "id": <int>, "image_b64": "<base64>"}` を受け、
-stdout に `{"type": "result", "id": <int>, "tenhou_json": {...}, "confidence": <float>}` を返す。
+stdin から `{"type": "frame", "id": <int>, "image_b64": "<base64>",
+"roi_calibration": {...}}` を受け、
+stdout に `{"type": "result", "id": <int>, "tenhou_json": {...},
+"confidence": <float>}` を返す。
 
-MVP スケルトン: 実際の画像処理は未実装。
-- `--echo`: 受信した内容をそのままエコーバック
-- 通常起動: スタブ天鳳 JSON を返却
+issue #11: 手牌領域 (`roi_calibration.hand`) を OpenCV テンプレートマッチング
+で 13(+1) 牌に分解する。河 / ドラ / 場況などは別 issue で順次本物に置き換え
+られる予定で、それまでは `stub_tenhou_json()` が仮値を供給する。
+
+- `--echo`: 受信した内容をそのままエコーバック (デバッグ用)
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import sys
+from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
+
 from common import read_request, setup_stderr_logging, write_response
+from recognition.tile_recognizer import RoiRect, TileRecognizer
 
 logger = setup_stderr_logging("recognition")
 
+_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_recognizer: TileRecognizer | None = None
+
+
+def _get_recognizer() -> TileRecognizer:
+    global _recognizer
+    if _recognizer is None:
+        _recognizer = TileRecognizer(_TEMPLATE_DIR)
+    return _recognizer
+
 
 def stub_tenhou_json() -> dict[str, Any]:
-    """雛形の天鳳 JSON。手牌・河・場況などを実装中は仮値で返す。"""
+    """`hand` 以外のフィールド用のスタブ値。後続 issue で順次置き換わる。"""
     return {
-        "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1z", "2z", "3z", "5m"],
+        "hand": [],
         "river": [],
         "dora_indicators": ["5p"],
         "self_wind": "東",
@@ -33,15 +54,47 @@ def stub_tenhou_json() -> dict[str, Any]:
     }
 
 
+def _decode_frame(image_b64: Any) -> np.ndarray | None:
+    if not isinstance(image_b64, str) or not image_b64:
+        return None
+    try:
+        raw = base64.b64decode(image_b64, validate=False)
+    except (binascii.Error, ValueError):
+        logger.warning("failed to base64-decode image_b64")
+        return None
+    buf = np.frombuffer(raw, dtype=np.uint8)
+    if buf.size == 0:
+        return None
+    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if img is None:
+        logger.warning("cv2.imdecode returned None (corrupt PNG?)")
+    return img
+
+
 def handle_frame(req: dict[str, Any]) -> dict[str, Any]:
-    """1 フレームを処理して結果を返す。"""
+    """1 フレームを処理して結果を返す。例外時も必ずスキーマを満たすレスポンスを返す。"""
     frame_id = req.get("id", -1)
-    # TODO(Phase C): image_b64 をデコードして OpenCV で認識する
+    tenhou_json = stub_tenhou_json()
+    confidence = 0.0
+
+    try:
+        bgr = _decode_frame(req.get("image_b64"))
+        if bgr is not None:
+            roi_calib = req.get("roi_calibration") or {}
+            hand_roi = RoiRect.from_dict(
+                roi_calib.get("hand") if isinstance(roi_calib, dict) else None
+            )
+            tiles, conf = _get_recognizer().recognize_hand(bgr, hand_roi)
+            tenhou_json["hand"] = tiles
+            confidence = conf
+    except Exception as e:  # noqa: BLE001 — recognition プロセスを落とさない
+        logger.warning("hand recognition failed for id=%s: %s", frame_id, e)
+
     return {
         "type": "result",
         "id": frame_id,
-        "tenhou_json": stub_tenhou_json(),
-        "confidence": 0.0,
+        "tenhou_json": tenhou_json,
+        "confidence": confidence,
     }
 
 
@@ -51,6 +104,10 @@ def main() -> int:
     args = parser.parse_args()
 
     logger.info("recognition process started (echo=%s)", args.echo)
+
+    if not args.echo:
+        # テンプレロードを起動時に走らせ、不在時の警告を早期に出す。
+        _get_recognizer()
 
     try:
         for req in read_request():
