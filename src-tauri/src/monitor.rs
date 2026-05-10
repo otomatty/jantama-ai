@@ -8,19 +8,30 @@
 //   3. 推論プロセスへ送信 → 推奨候補 JSON 受信 (Python B)
 //   4. Tauri Event でフロントエンドへ結果を emit
 //
-// Phase B (本 PR): recognition / mortal の 2 プロセスを起動し、
-// 起動直後に ping/pong スモークテストを 1 サイクル流す所までを実装する。
-// キャプチャ → 認識 → 推論の本ループは後続 Issue (B2/B3) で配線する。
+// Phase B2 (本 PR): キャプチャ → recognition → mortal → `inference-result`
+// emit の一気通貫パイプラインを 1Hz で回す。
 
+use crate::capture;
 use crate::python_proc::{PythonProcError, PythonProcess};
+use crate::types::{ActionType, GameBoardSummary, InferenceResult, RecommendationCandidate};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use chrono::Utc;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Runtime};
 use thiserror::Error;
 use tracing::{info, warn};
 
 const SMOKE_PING_ID: i64 = 0;
+/// 監視ループの 1 サイクル間隔。後で短縮可能 (issue #4)。
+const FRAME_INTERVAL: Duration = Duration::from_secs(1);
+/// 停止フラグへの応答性を保つために sleep を細切れにする粒度。
+const SLEEP_SLICE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Error)]
 pub enum MonitorError {
@@ -68,13 +79,34 @@ impl Drop for MonitorHandle {
     }
 }
 
+/// `inference-result` イベントの payload。
+/// フロント側 (`src/types/index.ts`) の `InferenceResult` + `GameBoardSummary` に対応。
+#[derive(Debug, Clone, Serialize)]
+pub struct InferenceEventPayload {
+    pub inference: InferenceResult,
+    pub board: Option<GameBoardSummary>,
+}
+
+/// `recognition-error` イベントの payload。
+/// フロント側 `AppError` (src/types/index.ts) と互換になるよう
+/// `type` フィールドにエラー分類 (recognition / inference / capture) を入れる。
+#[derive(Debug, Clone, Serialize)]
+pub struct RecognitionErrorPayload {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub message: String,
+    pub occurred_at: String,
+}
+
 /// 監視ループを起動する。
 ///
 /// recognition / mortal の 2 プロセスを spawn し、起動直後に
-/// ping/pong スモークテストを 1 サイクルだけ流す。失敗しても
-/// プロセス自体は維持し warning ログのみ出して継続する
-/// (uv の依存解決などで初回応答が遅れるケースを許容するため)。
-pub fn start(config: MonitorConfig) -> Result<MonitorHandle, MonitorError> {
+/// ping/pong スモークテストを 1 サイクル流したあと、本ループで
+/// キャプチャ → recognition → mortal → emit を 1Hz で繰り返す。
+pub fn start<R: Runtime>(
+    app: AppHandle<R>,
+    config: MonitorConfig,
+) -> Result<MonitorHandle, MonitorError> {
     let MonitorConfig {
         capture_target,
         recognition_program,
@@ -110,21 +142,59 @@ pub fn start(config: MonitorConfig) -> Result<MonitorHandle, MonitorError> {
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_for_thread = stop_flag.clone();
-    // ping/pong は recv_line がブロッキングなため、監視ループとは別スレッドで
-    // 並行に走らせる。こうしておけば
-    //   - start_monitoring は即座に MonitorHandle を返せる
-    //   - recognition と mortal のスモークが互いをブロックしない
-    //   - 監視ループ本体の 500ms ポーリング (stop_flag 監視) も止まらない
-    // スモークが応答しない場合でも、stop 経由の kill() で recv_line が
-    // Err(Terminated) を返してスレッドは自然終了する。
-    spawn_smoke_ping(recognition.clone(), "recognition");
-    spawn_smoke_ping(mortal.clone(), "mortal");
+    let rec_for_thread = recognition.clone();
+    let mortal_for_thread = mortal.clone();
+    let app_for_thread = app.clone();
 
     let join = std::thread::spawn(move || {
         info!(target: "monitor", "monitor loop started");
+
+        // スモーク ping/pong は本ループの前に済ませる。
+        // 並行に走らせると `PythonProcess::request_line` の roundtrip ロックを
+        // スモーク側が握ったまま recv で詰まり、本ループのフレーム要求が
+        // 出せなくなる (#36 review by codex)。recognition と mortal は別プロセスなので
+        // 双方のスモークだけはスレッド分割して並列化し、起動時間を短縮する。
+        let rec_smoke = {
+            let p = rec_for_thread.clone();
+            std::thread::spawn(move || smoke_ping(p.as_ref(), "recognition"))
+        };
+        let mortal_smoke = {
+            let p = mortal_for_thread.clone();
+            std::thread::spawn(move || smoke_ping(p.as_ref(), "mortal"))
+        };
+        let _ = rec_smoke.join();
+        let _ = mortal_smoke.join();
+
+        // SMOKE_PING_ID (=0) と衝突しないよう 1 から開始。
+        let mut frame_id: i64 = SMOKE_PING_ID + 1;
         while !stop_for_thread.load(Ordering::SeqCst) {
-            // TODO(Phase B2/B3): capture → recognize → infer → emit event
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            let cycle_start = Instant::now();
+            match run_cycle(
+                &capture_target,
+                frame_id,
+                rec_for_thread.as_ref(),
+                mortal_for_thread.as_ref(),
+            ) {
+                Ok((inference, board)) => {
+                    let payload = InferenceEventPayload { inference, board };
+                    if let Err(e) = app_for_thread.emit("inference-result", &payload) {
+                        warn!(target: "monitor", "emit inference-result failed: {}", e);
+                    }
+                }
+                Err(e) => {
+                    warn!(target: "monitor", "cycle failed: {}", e);
+                    let payload = RecognitionErrorPayload {
+                        kind: e.kind(),
+                        message: e.to_string(),
+                        occurred_at: Utc::now().to_rfc3339(),
+                    };
+                    if let Err(emit_err) = app_for_thread.emit("recognition-error", &payload) {
+                        warn!(target: "monitor", "emit recognition-error failed: {}", emit_err);
+                    }
+                }
+            }
+            frame_id = frame_id.wrapping_add(1);
+            sleep_until_next_cycle(cycle_start, &stop_for_thread);
         }
         warn!(target: "monitor", "monitor loop terminated");
     });
@@ -137,35 +207,279 @@ pub fn start(config: MonitorConfig) -> Result<MonitorHandle, MonitorError> {
     })
 }
 
-/// 1 サイクルの ping/pong を fire-and-forget で流す専用ワーカーを起動する。
-/// recv_line がブロッキングなので独立スレッドに切り出しておけば、
-/// recognition / mortal どちらかが応答しなくても他方や監視ループ本体の
-/// 500ms ポーリングは止まらない。スレッドへ渡した Arc が drop されることで
-/// MonitorHandle::stop の kill() が伝播し、recv_line が Err(Terminated) で
-/// 戻ってこのスレッドも自然終了する。
-fn spawn_smoke_ping(proc: Arc<PythonProcess>, label: &'static str) {
-    std::thread::spawn(move || {
-        if let Err(e) = proc.send_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID)) {
-            warn!(target: "monitor", "smoke ping send failed [{}]: {}", label, e);
+/// 1 サイクル経過後、次サイクル開始までを `SLEEP_SLICE` 刻みで待機する。
+/// stop_flag が立てば即座に抜けて停止に応答する。
+fn sleep_until_next_cycle(cycle_start: Instant, stop_flag: &AtomicBool) {
+    let deadline = cycle_start + FRAME_INTERVAL;
+    while !stop_flag.load(Ordering::SeqCst) {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline - now;
+        std::thread::sleep(remaining.min(SLEEP_SLICE));
+    }
+}
+
+#[derive(Debug, Error)]
+enum CycleError {
+    #[error("capture target window id is empty")]
+    NoTarget,
+    #[error("capture failed: {0}")]
+    Capture(String),
+    #[error("png encode failed: {0}")]
+    PngEncode(String),
+    #[error("recognition io failed: {0}")]
+    RecognitionIo(PythonProcError),
+    #[error("recognition response invalid: {0}")]
+    RecognitionInvalid(String),
+    #[error("mortal io failed: {0}")]
+    MortalIo(PythonProcError),
+    #[error("mortal response invalid: {0}")]
+    MortalInvalid(String),
+}
+
+impl CycleError {
+    /// フロント側 `AppError.type` (src/types/index.ts) と整合する分類を返す。
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::NoTarget | Self::Capture(_) | Self::PngEncode(_) => "capture",
+            Self::RecognitionIo(_) | Self::RecognitionInvalid(_) => "recognition",
+            Self::MortalIo(_) | Self::MortalInvalid(_) => "inference",
+        }
+    }
+}
+
+/// 1 フレーム分の capture → recognition → mortal を実行する。
+fn run_cycle(
+    capture_target: &str,
+    frame_id: i64,
+    recognition: &PythonProcess,
+    mortal: &PythonProcess,
+) -> Result<(InferenceResult, Option<GameBoardSummary>), CycleError> {
+    if capture_target.trim().is_empty() {
+        return Err(CycleError::NoTarget);
+    }
+
+    let img =
+        capture::capture_window(capture_target).map_err(|e| CycleError::Capture(e.to_string()))?;
+    let png = encode_png(&img).map_err(CycleError::PngEncode)?;
+    let image_b64 = B64.encode(&png);
+
+    // recognition: フレーム送信 → tenhou_json 受信
+    let frame_req = serde_json::json!({
+        "type": "frame",
+        "id": frame_id,
+        "image_b64": image_b64,
+    });
+    let rec_line = recognition
+        .request_line(&frame_req.to_string())
+        .map_err(CycleError::RecognitionIo)?;
+    let rec_parsed: serde_json::Value = serde_json::from_str(rec_line.trim())
+        .map_err(|e| CycleError::RecognitionInvalid(format!("json: {}", e)))?;
+    if rec_parsed.get("type").and_then(|v| v.as_str()) != Some("result") {
+        return Err(CycleError::RecognitionInvalid(format!(
+            "unexpected type: {}",
+            rec_parsed
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        )));
+    }
+    // 取り違えガード: id が要求と一致しない応答は古いフレームの結果として捨てる。
+    let rec_id = rec_parsed
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| CycleError::RecognitionInvalid("missing id".into()))?;
+    if rec_id != frame_id {
+        return Err(CycleError::RecognitionInvalid(format!(
+            "id mismatch: expected {}, got {}",
+            frame_id, rec_id
+        )));
+    }
+    let tenhou_json = rec_parsed
+        .get("tenhou_json")
+        .cloned()
+        .ok_or_else(|| CycleError::RecognitionInvalid("missing tenhou_json".into()))?;
+    let board = build_board_summary(&tenhou_json);
+
+    // mortal: tenhou_json 送信 → 推奨候補受信
+    let infer_req = serde_json::json!({
+        "type": "infer",
+        "id": frame_id,
+        "tenhou_json": tenhou_json,
+    });
+    let infer_line = mortal
+        .request_line(&infer_req.to_string())
+        .map_err(CycleError::MortalIo)?;
+    let infer_parsed: serde_json::Value = serde_json::from_str(infer_line.trim())
+        .map_err(|e| CycleError::MortalInvalid(format!("json: {}", e)))?;
+    if infer_parsed.get("type").and_then(|v| v.as_str()) != Some("result") {
+        return Err(CycleError::MortalInvalid(format!(
+            "unexpected type: {}",
+            infer_parsed
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        )));
+    }
+    let infer_id = infer_parsed
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| CycleError::MortalInvalid("missing id".into()))?;
+    if infer_id != frame_id {
+        return Err(CycleError::MortalInvalid(format!(
+            "id mismatch: expected {}, got {}",
+            frame_id, infer_id
+        )));
+    }
+
+    let recommended_value = infer_parsed
+        .get("recommended")
+        .cloned()
+        .ok_or_else(|| CycleError::MortalInvalid("missing recommended".into()))?;
+    let recommended: RecommendationCandidate = serde_json::from_value(recommended_value)
+        .map_err(|e| CycleError::MortalInvalid(format!("recommended: {}", e)))?;
+    let candidates_value = infer_parsed
+        .get("candidates")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let candidates: Vec<RecommendationCandidate> = serde_json::from_value(candidates_value)
+        .map_err(|e| CycleError::MortalInvalid(format!("candidates: {}", e)))?;
+    let timestamp = infer_parsed
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+    let primary_label = format_primary_label(&recommended);
+
+    let inference = InferenceResult {
+        recommended,
+        candidates,
+        timestamp,
+        primary_label,
+        reason: None,
+        danger: None,
+        safe: None,
+    };
+
+    Ok((inference, board))
+}
+
+/// 推奨候補から UI のプライマリ表示文を組み立てる。
+///
+/// - mortal が `action_label` を返している場合はそれを優先して尊重する
+///   (フロント側の表現バリエーション「リーチ / ダマ / スルー」等を残せるため)。
+/// - 無い場合は `action_type` ごとの定型文にフォールバックし、Discard だけは
+///   `tile` と組み合わせて「N を切る」にする。`tile` が無い Discard は
+///   想定外なので `None` を返してフロント側で他の手掛かり (recommended.tile
+///   等) に任せる。
+fn format_primary_label(rec: &RecommendationCandidate) -> Option<String> {
+    if let Some(label) = rec.action_label.as_ref().filter(|s| !s.trim().is_empty()) {
+        return Some(label.clone());
+    }
+    match rec.action_type {
+        ActionType::Discard => rec.tile.as_ref().map(|t| format!("{} を切る", t)),
+        ActionType::Riichi => Some("リーチ".into()),
+        ActionType::Tsumo => Some("ツモ".into()),
+        ActionType::Ron => Some("ロン".into()),
+        ActionType::Pon => Some("ポン".into()),
+        ActionType::Chi => Some("チー".into()),
+        ActionType::Kan => Some("カン".into()),
+        ActionType::Pass => Some("スルー".into()),
+    }
+}
+
+/// `RgbaImage` を PNG にエンコードしてバイト列で返す。
+fn encode_png(img: &xcap::image::RgbaImage) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+    let mut buf = Vec::new();
+    img.write_to(&mut Cursor::new(&mut buf), xcap::image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// recognition が返す tenhou_json から UI 用の盤面サマリを抽出する。
+/// 必須フィールド (hand, self_wind, round_wind, turn, dora_indicators) が
+/// 揃わない場合は `None` を返し、フロント側で「盤面なし」表示にフォールバックさせる。
+fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
+    let obj = tenhou.as_object()?;
+    // 配列要素が全て文字列でない場合は、部分的な手牌で先に進むより
+    // GameBoardSummary 全体を None にして「盤面なし」表示に倒した方が安全。
+    // recognition 側のスキーマ崩れ (例: 数値が混ざる) を黙って通過させない。
+    let hand: Vec<String> = obj
+        .get("hand")?
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(String::from))
+        .collect::<Option<Vec<String>>>()?;
+    let self_wind = obj.get("self_wind")?.as_str()?.to_string();
+    let round_wind = obj.get("round_wind")?.as_str()?.to_string();
+    let turn: u32 = obj.get("turn")?.as_u64()?.try_into().ok()?;
+    let dora_indicators: Vec<String> = obj
+        .get("dora_indicators")?
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(String::from))
+        .collect::<Option<Vec<String>>>()?;
+    // tenhou 形式の `scores` は座順 (東→南→西→北) に並んでいる前提で、
+    // 自分のスコアを `self_wind` から引く。先頭固定だと起家以外で誤った値が
+    // フロントに渡るため。インデックスを引けない場合は `None` にして
+    // 「持ち点不明」フォールバックさせる。
+    let score = self_wind_index(&self_wind).and_then(|idx| {
+        obj.get("scores")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.get(idx))
+            .and_then(|v| v.as_i64())
+    });
+    let round_label = obj
+        .get("round_label")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Some(GameBoardSummary {
+        hand,
+        self_wind,
+        round_wind,
+        turn,
+        dora_indicators,
+        score,
+        round_label,
+    })
+}
+
+/// 自家の風 (`self_wind`) を `scores` 配列のインデックスへ写像する。
+/// tenhou 形式では座順 = 東 (0), 南 (1), 西 (2), 北 (3) で並ぶ。
+fn self_wind_index(self_wind: &str) -> Option<usize> {
+    match self_wind {
+        "東" => Some(0),
+        "南" => Some(1),
+        "西" => Some(2),
+        "北" => Some(3),
+        _ => None,
+    }
+}
+
+/// 1 往復の ping/pong を同期実行する。本ループ突入前に呼ばれる前提なので、
+/// `request_line` の roundtrip ロックを握っても誰も待っていない。応答が無く
+/// 詰まった場合でも stop() の kill() が `recv_line` を解錠して戻ってくる。
+fn smoke_ping(proc: &PythonProcess, label: &'static str) {
+    let resp = match proc.request_line(&format!(r#"{{"type":"ping","id":{}}}"#, SMOKE_PING_ID)) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(target: "monitor", "smoke ping/pong [{}] failed: {}", label, e);
             return;
         }
-        let resp = match proc.recv_line() {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(target: "monitor", "smoke pong recv failed [{}]: {}", label, e);
-                return;
-            }
-        };
-        let trimmed = resp.trim();
-        match validate_pong(trimmed) {
-            Ok(()) => info!(target: "monitor", "smoke ping/pong [{}]: ok ({})", label, trimmed),
-            Err(reason) => warn!(
-                target: "monitor",
-                "smoke ping/pong [{}]: {} (raw: {})",
-                label, reason, trimmed
-            ),
-        }
-    });
+    };
+    let trimmed = resp.trim();
+    match validate_pong(trimmed) {
+        Ok(()) => info!(target: "monitor", "smoke ping/pong [{}]: ok ({})", label, trimmed),
+        Err(reason) => warn!(
+            target: "monitor",
+            "smoke ping/pong [{}]: {} (raw: {})",
+            label, reason, trimmed
+        ),
+    }
 }
 
 /// レスポンスが期待通りの `{"type":"pong","id":SMOKE_PING_ID}` であることを

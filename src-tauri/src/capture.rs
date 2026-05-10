@@ -32,7 +32,6 @@ pub fn list_windows() -> Result<Vec<CaptureWindow>, CaptureError> {
 ///
 /// MVP では Python 認識プロセスへ stdin で渡す前提。
 /// PNG 化したい場合は `image` クレート (xcap が再エクスポート) で encode する。
-#[allow(dead_code)]
 pub fn capture_window(window_id: &str) -> Result<xcap::image::RgbaImage, CaptureError> {
     let windows = Window::all()?;
     let w = windows

@@ -26,6 +26,12 @@ pub struct PythonProcess {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
     stdout: Mutex<BufReader<ChildStdout>>,
+    /// 送信→受信を 1 つのトランザクションとして直列化するためのロック。
+    /// stdin / stdout のロックは個別なので、複数スレッドが
+    /// `send_line` → `recv_line` を呼ぶと別スレッドの応答を
+    /// 取り違える race が起き得る (#36 review)。`request_line` で
+    /// このロックを取って往復をくくることで防ぐ。
+    roundtrip: Mutex<()>,
     label: String,
 }
 
@@ -78,8 +84,20 @@ impl PythonProcess {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             stdout: Mutex::new(BufReader::new(stdout)),
+            roundtrip: Mutex::new(()),
             label,
         })
+    }
+
+    /// 1 行送って 1 行受け取る同期トランザクション。
+    ///
+    /// 複数スレッドからこのメソッドを呼んでも、`roundtrip` ロックで
+    /// 直列化されるので応答の取り違えは発生しない。スモークと監視ループの
+    /// ように同一プロセスへ並行アクセスするコードはこちらを使う。
+    pub fn request_line(&self, line: &str) -> Result<String, PythonProcError> {
+        let _guard = self.roundtrip.lock().unwrap();
+        self.send_line(line)?;
+        self.recv_line()
     }
 
     /// 1 行 JSON を送信する (末尾 \n を自動付与)。
@@ -90,7 +108,7 @@ impl PythonProcess {
             stdin.write_all(b"\n")?;
         }
         stdin.flush()?;
-        debug!(target: "python_proc", "[{}] -> {}", self.label, line);
+        debug!(target: "python_proc", "[{}] -> {}", self.label, redact_for_log(line));
         Ok(())
     }
 
@@ -121,4 +139,25 @@ impl Drop for PythonProcess {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// `debug!` ログ出力用に 1 行 JSON をサニタイズする。
+///
+/// frame リクエストには `image_b64` (画面キャプチャの base64) が乗るため、
+/// そのままログに垂れ流すとスクリーンショットがファイル/ターミナルに溜まる。
+/// JSON として解釈できれば該当フィールドをサイズだけ残して伏せ、解釈
+/// できなければ元の文字列を返す。
+fn redact_for_log(line: &str) -> String {
+    let trimmed = line.trim();
+    let mut value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return trimmed.to_string(),
+    };
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(img) = obj.get_mut("image_b64") {
+            let len = img.as_str().map(str::len).unwrap_or(0);
+            *img = serde_json::Value::String(format!("<redacted {} bytes>", len));
+        }
+    }
+    value.to_string()
 }

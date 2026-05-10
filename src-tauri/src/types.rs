@@ -130,3 +130,18 @@ pub struct InferenceResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe: Option<Vec<String>>,
 }
+
+/// PRD §6 / src/types/index.ts の `GameBoardSummary` に対応。
+/// recognition プロセスが返す `tenhou_json` から抽出してフロントへ届ける。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameBoardSummary {
+    pub hand: Vec<String>,
+    pub self_wind: String,
+    pub round_wind: String,
+    pub turn: u32,
+    pub dora_indicators: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_label: Option<String>,
+}
