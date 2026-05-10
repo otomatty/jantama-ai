@@ -13,10 +13,11 @@
 
 use crate::capture;
 use crate::python_proc::{PythonProcError, PythonProcess};
-use crate::types::{ActionType, GameBoardSummary, InferenceResult, RecommendationCandidate};
+use crate::types::{
+    ActionType, GameBoardSummary, InferenceBackend, InferenceResult, RecommendationCandidate,
+};
 use chrono::Utc;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -39,15 +40,14 @@ pub enum MonitorError {
     MortalSpawn(PythonProcError),
 }
 
-/// `monitor::start` の引数。フロント設定や開発/本番ビルドの差異を
-/// commands 側で吸収して渡す。
+/// `monitor::start` の引数。フロント設定からキャプチャ対象とモデル設定だけ
+/// 受け取り、Python サブプロセスの起動方法 (dev `uv run` / release バンドル exe)
+/// は `PythonProcess::spawn_recognition` / `spawn_mortal` 側で吸収する。
 pub struct MonitorConfig {
     pub capture_target: String,
-    pub recognition_program: PathBuf,
-    pub recognition_args: Vec<String>,
-    pub mortal_program: PathBuf,
-    pub mortal_args: Vec<String>,
-    pub python_cwd: Option<PathBuf>,
+    /// 空文字列なら mortal を `--stub` モードで起動する。
+    pub mortal_model_path: String,
+    pub inference_backend: InferenceBackend,
 }
 
 pub struct MonitorHandle {
@@ -107,35 +107,17 @@ pub fn start<R: Runtime>(
 ) -> Result<MonitorHandle, MonitorError> {
     let MonitorConfig {
         capture_target,
-        recognition_program,
-        recognition_args,
-        mortal_program,
-        mortal_args,
-        python_cwd,
+        mortal_model_path,
+        inference_backend,
     } = config;
 
     info!(target: "monitor", "starting monitor for target='{}'", capture_target);
 
-    let rec_args: Vec<&str> = recognition_args.iter().map(String::as_str).collect();
-    let mortal_args_ref: Vec<&str> = mortal_args.iter().map(String::as_str).collect();
-
-    let recognition = Arc::new(
-        PythonProcess::spawn(
-            "recognition",
-            recognition_program.as_path(),
-            &rec_args,
-            python_cwd.as_deref(),
-        )
-        .map_err(MonitorError::RecognitionSpawn)?,
-    );
+    let recognition =
+        Arc::new(PythonProcess::spawn_recognition(&app).map_err(MonitorError::RecognitionSpawn)?);
     let mortal = Arc::new(
-        PythonProcess::spawn(
-            "mortal",
-            mortal_program.as_path(),
-            &mortal_args_ref,
-            python_cwd.as_deref(),
-        )
-        .map_err(MonitorError::MortalSpawn)?,
+        PythonProcess::spawn_mortal(&app, &mortal_model_path, inference_backend)
+            .map_err(MonitorError::MortalSpawn)?,
     );
 
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -497,32 +479,4 @@ fn validate_pong(line: &str) -> Result<(), String> {
         )),
         None => Err("missing or non-integer 'id' field".into()),
     }
-}
-
-/// 開発時に `python/pyproject.toml` がある場所を解決する。
-/// `cargo tauri dev` ではバイナリが `src-tauri/target/debug/` に生成されるため、
-/// cwd か exe からの上位ディレクトリ走査で `python/` を探す。
-pub fn resolve_python_project_dir() -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.to_path_buf());
-        }
-    }
-
-    for start in candidates {
-        let mut cur: Option<&Path> = Some(start.as_path());
-        while let Some(dir) = cur {
-            let candidate = dir.join("python");
-            if candidate.join("pyproject.toml").is_file() {
-                return Some(candidate);
-            }
-            cur = dir.parent();
-        }
-    }
-    None
 }

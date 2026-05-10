@@ -7,7 +7,6 @@ use crate::types::{
 };
 use crate::{capture, monitor, AppState};
 use chrono::Utc;
-use std::path::PathBuf;
 use tauri::{AppHandle, State};
 use tauri_plugin_store::StoreExt;
 
@@ -60,33 +59,15 @@ pub async fn start_monitoring(app: AppHandle, state: State<'_, AppState>) -> Res
         .clone()
         .unwrap_or_default();
 
-    let python_cwd = monitor::resolve_python_project_dir();
-
-    // 開発デフォルト: `uv run jantama-recognition` / `uv run jantama-mortal`。
-    // PyInstaller バンドル後は別途 .exe パスを差し込めるよう Vec<String> で持つ。
-    let recognition_program: PathBuf = "uv".into();
-    let recognition_args: Vec<String> = vec!["run".into(), "jantama-recognition".into()];
-
-    let mortal_program: PathBuf = "uv".into();
-    let mut mortal_args: Vec<String> = vec!["run".into(), "jantama-mortal".into()];
-    match settings.mortal_model_path.as_deref() {
-        Some(path) if !path.trim().is_empty() => {
-            mortal_args.push("--model".into());
-            mortal_args.push(path.to_string());
-        }
-        _ => {
-            // モデル未設定時は Python 側の --stub に倒して MVP UI を確認可能にする。
-            mortal_args.push("--stub".into());
-        }
-    }
+    // dev/release それぞれの起動方式は `PythonProcess::spawn_recognition` /
+    // `spawn_mortal` が `resolve_python_command` 経由で吸収する。
+    // ここでは設定値だけ渡す。空文字列なら mortal は `--stub` で起動する。
+    let mortal_model_path = settings.mortal_model_path.clone().unwrap_or_default();
 
     let config = monitor::MonitorConfig {
         capture_target: target,
-        recognition_program,
-        recognition_args,
-        mortal_program,
-        mortal_args,
-        python_cwd,
+        mortal_model_path,
+        inference_backend: settings.inference_backend,
     };
 
     let handle = monitor::start(app.clone(), config).map_err(|e| e.to_string())?;
