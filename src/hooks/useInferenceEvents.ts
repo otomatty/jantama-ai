@@ -77,28 +77,37 @@ export function useInferenceEvents({
     let errorUnlisten: UnlistenFn | null = null;
 
     (async () => {
+      // Promise.all で並列登録すると 2 つ目が reject した時に
+      // 1 つ目の UnlistenFn が捨てられて listener がリークするため、
+      // 順次登録して部分登録のクリーンアップを担保する。
+      let tempInferenceUn: UnlistenFn | null = null;
       try {
-        const [inferenceUn, errorUn] = await Promise.all([
-          listen<InferenceEventPayload>("inference-result", (event) => {
+        tempInferenceUn = await listen<InferenceEventPayload>(
+          "inference-result",
+          (event) => {
             // 監視 OFF と listener 解除の競合で古いイベントが届くことがあるため
             // コールバック側でも cancelled を確認する
             if (cancelled) return;
             onInference(event.payload.inference, event.payload.board ?? null);
-          }),
-          listen<AppError>("recognition-error", (event) => {
-            if (cancelled) return;
-            onError(event.payload);
-          }),
-        ]);
-        // listen の登録中に watching が false に戻った場合は即解除
+          },
+        );
         if (cancelled) {
-          inferenceUn();
-          errorUn();
+          tempInferenceUn();
           return;
         }
-        inferenceUnlisten = inferenceUn;
-        errorUnlisten = errorUn;
+        const tempErrorUn = await listen<AppError>("recognition-error", (event) => {
+          if (cancelled) return;
+          onError(event.payload);
+        });
+        if (cancelled) {
+          tempInferenceUn();
+          tempErrorUn();
+          return;
+        }
+        inferenceUnlisten = tempInferenceUn;
+        errorUnlisten = tempErrorUn;
       } catch (e) {
+        tempInferenceUn?.();
         if (!cancelled) {
           onError(toAppError("unknown", "failed to subscribe tauri events", e));
         }
