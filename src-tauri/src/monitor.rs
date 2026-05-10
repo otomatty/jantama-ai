@@ -14,8 +14,6 @@
 use crate::capture;
 use crate::python_proc::{PythonProcError, PythonProcess};
 use crate::types::{ActionType, GameBoardSummary, InferenceResult, RecommendationCandidate};
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine as _;
 use chrono::Utc;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -263,8 +261,8 @@ fn run_cycle(
 
     let img =
         capture::capture_window(capture_target).map_err(|e| CycleError::Capture(e.to_string()))?;
-    let png = encode_png(&img).map_err(CycleError::PngEncode)?;
-    let image_b64 = B64.encode(&png);
+    let image_b64 =
+        capture::encode_png_base64(&img).map_err(|e| CycleError::PngEncode(e.to_string()))?;
 
     // recognition: フレーム送信 → tenhou_json 受信
     let frame_req = serde_json::json!({
@@ -389,15 +387,6 @@ fn format_primary_label(rec: &RecommendationCandidate) -> Option<String> {
         ActionType::Kan => Some("カン".into()),
         ActionType::Pass => Some("スルー".into()),
     }
-}
-
-/// `RgbaImage` を PNG にエンコードしてバイト列で返す。
-fn encode_png(img: &xcap::image::RgbaImage) -> Result<Vec<u8>, String> {
-    use std::io::Cursor;
-    let mut buf = Vec::new();
-    img.write_to(&mut Cursor::new(&mut buf), xcap::image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    Ok(buf)
 }
 
 /// recognition が返す tenhou_json から UI 用の盤面サマリを抽出する。
