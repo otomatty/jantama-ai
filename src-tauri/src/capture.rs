@@ -6,10 +6,9 @@ use crate::types::CaptureWindow;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use std::error::Error;
-use std::io::Cursor;
 use std::time::Instant;
 use tracing::debug;
-use xcap::image::codecs::png::PngEncoder;
+use xcap::image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use xcap::image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use xcap::Window;
 
@@ -54,17 +53,15 @@ pub fn capture_window(window_id: &str) -> Result<RgbaImage, CaptureError> {
 /// `RgbaImage` を PNG にエンコードし base64 (STANDARD) 文字列で返す。
 ///
 /// Python 認識プロセスへ送る `{"type":"frame","image_b64":"..."}` の payload を
-/// 組み立てるためのユーティリティ。PRD §7.1 の目安は 1920x1080 を 50ms 以内。
+/// 組み立てるためのユーティリティ。PRD §7.1 の目安は 1920x1080 を 50ms 以内なので、
+/// `CompressionType::Fast` + `FilterType::NoFilter` でエンコード時間を優先する
+/// (1Hz の監視ループでサイズより速度が支配的)。
 pub fn encode_png_base64(img: &RgbaImage) -> Result<String, CaptureError> {
     let started = Instant::now();
     let (width, height) = img.dimensions();
     let mut png_bytes = Vec::new();
-    PngEncoder::new(Cursor::new(&mut png_bytes)).write_image(
-        img.as_raw(),
-        width,
-        height,
-        ExtendedColorType::Rgba8,
-    )?;
+    PngEncoder::new_with_quality(&mut png_bytes, CompressionType::Fast, FilterType::NoFilter)
+        .write_image(img.as_raw(), width, height, ExtendedColorType::Rgba8)?;
     let encoded = B64.encode(&png_bytes);
     debug!(
         target: "capture",
