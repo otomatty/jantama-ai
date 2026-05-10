@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ContextBar } from "@/components/ContextBar";
 import { DangerSafeBlock } from "@/components/DangerSafeBlock";
 import { ErrorBody } from "@/components/ErrorBody";
@@ -8,15 +8,17 @@ import { IdleBody } from "@/components/IdleBody";
 import { MonitorButton } from "@/components/MonitorButton";
 import { ReasonBlock } from "@/components/ReasonBlock";
 import { StatusBar } from "@/components/StatusBar";
-import { runStubInference, startMonitoring, stopMonitoring } from "@/lib/tauriCommands";
+import { useInferenceEvents } from "@/hooks/useInferenceEvents";
+import { startMonitoring, stopMonitoring } from "@/lib/tauriCommands";
 import type { AppState } from "@/state/appState";
-import type { GameBoardSummary, InferenceResult } from "@/types";
+import type { AppError, GameBoardSummary, InferenceResult } from "@/types";
 
 interface MainScreenProps {
   state: AppState;
   onOpenSettings: () => void;
   onMonitoringChange: (watching: boolean) => void;
   onInferenceUpdate: (inference: InferenceResult, board: GameBoardSummary | null) => void;
+  onRecognitionError: (error: AppError) => void;
 }
 
 export function MainScreen({
@@ -24,6 +26,7 @@ export function MainScreen({
   onOpenSettings,
   onMonitoringChange,
   onInferenceUpdate,
+  onRecognitionError,
 }: MainScreenProps) {
   const [busy, setBusy] = useState(false);
 
@@ -42,21 +45,11 @@ export function MainScreen({
     }
   };
 
-  // ブラウザ動作確認用: 監視 ON 中に 5秒に1回スタブ推論を流す
-  useEffect(() => {
-    if (!state.monitoring.watching) return;
-    let cancelled = false;
-    const fire = async () => {
-      const { inference, board } = await runStubInference();
-      if (!cancelled) onInferenceUpdate(inference, board);
-    };
-    fire();
-    const id = setInterval(fire, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [state.monitoring.watching, onInferenceUpdate]);
+  useInferenceEvents({
+    watching: state.monitoring.watching,
+    onInference: onInferenceUpdate,
+    onError: onRecognitionError,
+  });
 
   return (
     <div
@@ -79,7 +72,7 @@ export function MainScreen({
       <div className="border-t border-ink-200 bg-white px-3 py-3">
         <MonitorButton
           on={state.monitoring.watching}
-          disabled={busy || state.phase === "uninitialized" || state.phase === "error"}
+          disabled={busy || state.phase === "uninitialized"}
           onClick={handleToggleWatching}
         />
       </div>
