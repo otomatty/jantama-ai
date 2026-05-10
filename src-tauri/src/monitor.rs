@@ -1139,10 +1139,7 @@ mod tests {
         assert!(cleaned.hand.is_some());
         assert!(cleaned.doras.is_none(), "negative x must be dropped");
         assert!(cleaned.rivers.self_seat.is_some());
-        assert!(
-            cleaned.rivers.right.is_none(),
-            "x+w > 1.0 must be dropped"
-        );
+        assert!(cleaned.rivers.right.is_none(), "x+w > 1.0 must be dropped");
         assert!(cleaned.round_info.is_some());
         assert!(cleaned.self_wind.is_none());
     }
