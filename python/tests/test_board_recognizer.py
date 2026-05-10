@@ -337,6 +337,23 @@ def test_recognize_turn_out_of_range_returns_none(monkeypatch: pytest.MonkeyPatc
     assert ocr_recognizer.recognize_turn(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) is None
 
 
+@pytest.mark.parametrize("h", [10, 15, 20, 24, 31])
+def test_preprocess_for_ocr_upscales_low_height_crops_to_target(h: int) -> None:
+    """Codex P2 on PR #44: 整数倍スケーリングだと h=20 や h=24 が拡大されないバグの退行防止。
+
+    32 // h の floor 演算では h ∈ [17, 31] でスケール 1 となり拡大が走らなかった。
+    現在は直接ターゲット高さに合わせる実装なので、h < TARGET なら必ず TARGET 以上の
+    高さに引き上がる。
+    """
+    crop = np.full((h, 40, 3), 128, dtype=np.uint8)
+    crop[1:-1, 1:-1] = 255
+    out = ocr_recognizer._preprocess_for_ocr(crop)
+    assert out.shape[0] >= ocr_recognizer._OCR_TARGET_HEIGHT, (
+        f"h={h} was not upscaled to >= {ocr_recognizer._OCR_TARGET_HEIGHT} px "
+        f"(got {out.shape[0]})"
+    )
+
+
 def test_round_label_to_wind() -> None:
     assert ocr_recognizer.round_label_to_wind("東1局") == "東"
     assert ocr_recognizer.round_label_to_wind("南3局") == "南"

@@ -61,6 +61,10 @@ _ROUND_LABEL_WHITELIST = "東南西北1234局"
 _DIGIT_WHITELIST = "0123456789"
 _SCORE_WHITELIST = "0123456789-"
 
+# OCR 前処理で低解像 ROI を拡大する目標高さ (px)。Tesseract は x-height が
+# 30〜35 px 程度のときに精度が出やすい (公式 FAQ より)。
+_OCR_TARGET_HEIGHT = 32
+
 # `pytesseract.image_to_string` の TesseractNotFoundError を例外名で識別 (型 import を避ける)。
 # 重要: `TesseractError` (非ゼロ終了, e.g. `jpn` 言語データ欠落) はここに含めない。
 # 含めると「設定不備」を「binary 未導入」と誤誘導し、ユーザに `jpn` パック不足の
@@ -90,9 +94,12 @@ def _preprocess_for_ocr(crop_bgr: np.ndarray) -> np.ndarray:
     残って Tesseract の細い線の読み取り精度が落ちるため。
     """
     h, w = crop_bgr.shape[:2]
-    if h < 32:
-        scale = max(1, 32 // max(1, h))
-        crop_bgr = cv2.resize(crop_bgr, (w * scale, h * scale), interpolation=cv2.INTER_LINEAR)
+    # 直接ターゲット高さに合わせる。整数倍 (32 // h) スケーリングだと h=20 で
+    # scale=1 (拡大なし) や h=15 で scale=2 (30px = 目標未達) になり、低解像 ROI
+    # での精度劣化が黙って発生していた (Codex P2 on PR #44)。
+    if 0 < h < _OCR_TARGET_HEIGHT:
+        new_w = max(1, round(w * _OCR_TARGET_HEIGHT / h))
+        crop_bgr = cv2.resize(crop_bgr, (new_w, _OCR_TARGET_HEIGHT), interpolation=cv2.INTER_LINEAR)
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
     # 雀魂 UI は概ね白文字 / 黒背景 or 暗文字 / 明背景。`THRESH_OTSU` で自動 2 値化。
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
