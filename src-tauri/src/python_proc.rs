@@ -47,6 +47,15 @@ enum ReaderEvent {
     Io(std::io::Error),
 }
 
+/// stderr 1 行に保持するバイト数の上限 (64 KiB)。
+///
+/// `read_until(b'\n', ..)` を素朴に使うと、改行を含まない巨大入力 (壊れた
+/// 子プロセスや 1 行 GiB 級のスタックダンプ等) でバッファが青天井に膨らみ
+/// アプリが OOM する。Python `logging` の通常レコードは数百〜数 KiB なので
+/// 64 KiB を超えたら以降を破棄して次の改行までスキップし、当該行は
+/// `[truncated]` を末尾に付けて流す (CodeRabbit on PR #41)。
+const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
+
 /// reader→consumer チャネルの上限。
 ///
 /// 元実装は `read_line` を consumer スレッドが直接呼んでいたため、OS の pipe
@@ -408,11 +417,25 @@ impl PythonProcess {
 /// `AppHandle::emit` を呼ぶだけの汎用 emitter を組み立てる。
 /// Tauri 側の emit が失敗した場合 (フロントが居ない / シャットダウン中等) は
 /// 警告ログだけ残してそのまま握りつぶす — Python 側のログ流入を止めない。
+///
+/// 連続失敗中 (フロント未接続 / 永続シャットダウン等) は最初の 1 回だけ
+/// `warn!` で残し、以降は `debug!` に格下げする。Python が高頻度ログを
+/// 流す状況で warning が洪水を起こすのを避けるため (CodeRabbit on PR #41)。
+/// emit が再び成功したらフラグをリセットして次回の失敗を再度 `warn!` する。
 fn make_tauri_log_emitter<R: Runtime>(app: &AppHandle<R>) -> PythonLogEmitter {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let app = app.clone();
-    Box::new(move |event| {
-        if let Err(e) = app.emit("python-log", &event) {
-            warn!(target: "python_proc", "emit python-log failed: {}", e);
+    let warned = AtomicBool::new(false);
+    Box::new(move |event| match app.emit("python-log", &event) {
+        Ok(()) => {
+            warned.store(false, Ordering::Relaxed);
+        }
+        Err(e) => {
+            if !warned.swap(true, Ordering::Relaxed) {
+                warn!(target: "python_proc", "emit python-log failed: {}", e);
+            } else {
+                debug!(target: "python_proc", "emit python-log still failing: {}", e);
+            }
         }
     })
 }
@@ -465,14 +488,18 @@ fn reader_loop(stdout: ChildStdout, tx: mpsc::SyncSender<ReaderEvent>, label: St
 /// UTF-8 ロケールの Python が CP932 等を吐くとそこで reader スレッドが
 /// 落ちて stderr の drain が止まり、結果的に pipe バッファが詰まって child が
 /// ハングする (Codex P1 on PR #41)。U+FFFD 置換に倒して drain を継続する。
+///
+/// 1 行のサイズは `MAX_STDERR_LINE_BYTES` で打ち切る。
+/// 巨大行 (改行無し / 暴走サブプロセス) で OOM しないため
+/// (CodeRabbit on PR #41)。打ち切り時は `[truncated]` を付けて次の改行まで
+/// バイトを捨てる。
 fn stderr_loop(stderr: ChildStderr, label: String, emitter: Option<PythonLogEmitter>) {
     let mut reader = BufReader::new(stderr);
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     loop {
         buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break, // EOF: child の stderr が閉じた
-            Ok(_) => {}
+        let outcome = match read_capped_line(&mut reader, &mut buf, MAX_STDERR_LINE_BYTES) {
+            Ok(o) => o,
             Err(e) => {
                 // OS レベルの I/O 失敗 (pipe が壊れた等)。ここまで来たら
                 // 続きを読む手段が無いので素直に抜ける。
@@ -483,16 +510,27 @@ fn stderr_loop(stderr: ChildStderr, label: String, emitter: Option<PythonLogEmit
                 );
                 break;
             }
+        };
+        if matches!(outcome, ReadOutcome::Eof) && buf.is_empty() {
+            break;
         }
         // 末尾の改行 (\n / \r\n) を取り除く。
         while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
             buf.pop();
         }
-        if buf.is_empty() {
+        let truncated = matches!(outcome, ReadOutcome::Truncated);
+        if buf.is_empty() && !truncated {
+            // EOF 直前の空行や、純粋な空行はスキップする。
+            if matches!(outcome, ReadOutcome::Eof) {
+                break;
+            }
             continue;
         }
         // invalid UTF-8 は U+FFFD に置換して握りつぶす (drain を止めない)。
-        let line = String::from_utf8_lossy(&buf);
+        let mut line = String::from_utf8_lossy(&buf).into_owned();
+        if truncated {
+            line.push_str(" [truncated]");
+        }
         let (level, logger, message) = parse_log_line(&line);
         // tracing の target はマクロ展開時に決まる &'static str しか
         // 受け取れないので、source / logger は構造化フィールドで渡す。
@@ -542,6 +580,64 @@ fn stderr_loop(stderr: ChildStderr, label: String, emitter: Option<PythonLogEmit
         }
     }
     debug!(target: "python_proc", "[{}] stderr reader thread exited", label);
+}
+
+/// `read_capped_line` の終端理由。`Line` は改行で正常に区切れた行、
+/// `Truncated` は `max_bytes` を超えたので残りを次の改行までスキップした行、
+/// `Eof` は EOF を踏んだ (この場合 buf には末尾の partial line が入り得る)。
+#[derive(Debug, PartialEq, Eq)]
+enum ReadOutcome {
+    Line,
+    Truncated,
+    Eof,
+}
+
+/// `reader` から 1 行 (改行までまたは EOF まで) を `buf` の末尾に追記する。
+///
+/// `max_bytes` を超える分は `buf` には積まず、次の改行までは `consume` だけ
+/// して捨てる (= 巨大行で OOM しないためのガード, CodeRabbit on PR #41)。
+/// `BufRead::fill_buf` を使うことで内部バッファのまま走査できるので、
+/// 1 KiB ずつコピーするよりも効率が良い。
+fn read_capped_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<ReadOutcome> {
+    let start_len = buf.len();
+    let mut overflowed = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(slice) => slice,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            // EOF。partial line が buf に残っていれば呼び出し側で処理する。
+            return Ok(if overflowed {
+                ReadOutcome::Truncated
+            } else {
+                ReadOutcome::Eof
+            });
+        }
+        let nl_pos = available.iter().position(|&b| b == b'\n');
+        let consume_to = nl_pos.map(|p| p + 1).unwrap_or(available.len());
+        if !overflowed {
+            let space = max_bytes.saturating_sub(buf.len() - start_len);
+            let take = consume_to.min(space);
+            buf.extend_from_slice(&available[..take]);
+            if take < consume_to {
+                overflowed = true;
+            }
+        }
+        reader.consume(consume_to);
+        if nl_pos.is_some() {
+            return Ok(if overflowed {
+                ReadOutcome::Truncated
+            } else {
+                ReadOutcome::Line
+            });
+        }
+    }
 }
 
 /// stderr 1 行を `(level, logger, message)` に分解する。
@@ -1038,6 +1134,31 @@ mod tests {
             "stderr drain stalled after non-UTF8 line; collected={:?}",
             *events
         );
+    }
+
+    /// 巨大行 (改行を含まない or 極端に長いダンプ) で OOM しないこと、
+    /// および打ち切り後も後続行が普通に届くことを確認する
+    /// (CodeRabbit on PR #41)。
+    #[test]
+    fn stderr_truncates_oversized_line_and_keeps_draining() {
+        let mut buf: Vec<u8> = Vec::new();
+        // 上限 16 バイトに対して "AAAA...\nINFO\trec\thi\n" を流す。
+        let mut reader =
+            std::io::BufReader::new(&b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nINFO\trec\thi\n"[..]);
+
+        let outcome = read_capped_line(&mut reader, &mut buf, 16).unwrap();
+        assert_eq!(outcome, ReadOutcome::Truncated);
+        assert!(buf.len() <= 16, "buf grew past cap: {}", buf.len());
+
+        buf.clear();
+        let outcome = read_capped_line(&mut reader, &mut buf, 64).unwrap();
+        assert_eq!(outcome, ReadOutcome::Line);
+        assert_eq!(buf, b"INFO\trec\thi\n");
+
+        buf.clear();
+        let outcome = read_capped_line(&mut reader, &mut buf, 64).unwrap();
+        assert_eq!(outcome, ReadOutcome::Eof);
+        assert!(buf.is_empty());
     }
 
     /// 大量の stderr ログ (10000 行) を吐いてもプロセス側がブロックしないことを
