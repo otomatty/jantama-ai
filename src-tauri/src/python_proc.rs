@@ -278,11 +278,7 @@ impl PythonProcess {
 
 /// stdout を 1 行ずつ読み、`tx` へイベントとして流す reader スレッド本体。
 /// プロセスが死ぬと `read_line` が 0 を返すので `Eof` を送って終了する。
-fn reader_loop(
-    stdout: ChildStdout,
-    tx: mpsc::Sender<ReaderEvent>,
-    label: String,
-) {
+fn reader_loop(stdout: ChildStdout, tx: mpsc::Sender<ReaderEvent>, label: String) {
     let mut reader = BufReader::new(stdout);
     loop {
         let mut buf = String::new();
@@ -498,7 +494,9 @@ mod tests {
     /// 設定したタイムアウト内に応答を取得できることを確認する。
     #[test]
     fn request_line_timeout_returns_response() {
-        let Some(python) = which::which("python3").ok().or_else(|| which::which("python").ok())
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
         else {
             eprintln!("skipping: python3/python not on PATH");
             return;
@@ -525,7 +523,9 @@ mod tests {
     /// `Timeout` を返すことを確認する。
     #[test]
     fn request_line_timeout_fires_when_python_silent() {
-        let Some(python) = which::which("python3").ok().or_else(|| which::which("python").ok())
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
         else {
             eprintln!("skipping: python3/python not on PATH");
             return;
@@ -545,14 +545,20 @@ mod tests {
         .expect("spawn silent python");
 
         let result = proc.request_line_timeout("ping\n", Duration::from_millis(300));
-        assert!(matches!(result, Err(PythonProcError::Timeout(_))), "got {:?}", result);
+        assert!(
+            matches!(result, Err(PythonProcError::Timeout(_))),
+            "got {:?}",
+            result
+        );
     }
 
     /// 即終了する Python を相手に `request_line_timeout` が
     /// `Terminated` を返すことを確認する。
     #[test]
     fn request_line_timeout_returns_terminated_on_dead_process() {
-        let Some(python) = which::which("python3").ok().or_else(|| which::which("python").ok())
+        let Some(python) = which::which("python3")
+            .ok()
+            .or_else(|| which::which("python").ok())
         else {
             eprintln!("skipping: python3/python not on PATH");
             return;
@@ -569,7 +575,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let result = proc.request_line_timeout("anything\n", Duration::from_secs(2));
         assert!(
-            matches!(result, Err(PythonProcError::Terminated) | Err(PythonProcError::SpawnFailed(_))),
+            matches!(
+                result,
+                Err(PythonProcError::Terminated) | Err(PythonProcError::SpawnFailed(_))
+            ),
             "got {:?}",
             result
         );

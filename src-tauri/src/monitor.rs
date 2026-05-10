@@ -375,9 +375,7 @@ fn map_recognition_error(e: PythonProcError) -> CycleError {
         // BrokenPipe など stdin 書き込みエラーは「もう死んでいる」事象として扱う。
         // 子が死んだ瞬間は `Terminated` か `SpawnFailed(BrokenPipe)` のどちらが
         // 起きるか OS / タイミング依存なので、両方を ProcessDied 扱いに寄せる。
-        PythonProcError::SpawnFailed(io_err)
-            if io_err.kind() == std::io::ErrorKind::BrokenPipe =>
-        {
+        PythonProcError::SpawnFailed(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {
             CycleError::RecognitionDied
         }
         other => CycleError::RecognitionIo(other),
@@ -388,9 +386,7 @@ fn map_mortal_error(e: PythonProcError) -> CycleError {
     match e {
         PythonProcError::Timeout(_) => CycleError::MortalTimeout,
         PythonProcError::Terminated => CycleError::MortalDied,
-        PythonProcError::SpawnFailed(io_err)
-            if io_err.kind() == std::io::ErrorKind::BrokenPipe =>
-        {
+        PythonProcError::SpawnFailed(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {
             CycleError::MortalDied
         }
         other => CycleError::MortalIo(other),
@@ -576,7 +572,9 @@ fn handle_cycle_error<R: Runtime>(
     info!(target: "monitor", "attempting one-shot restart of {:?}", dead);
     let spawn_result = match dead {
         DeadProcess::Recognition => PythonProcess::spawn_recognition(app),
-        DeadProcess::Mortal => PythonProcess::spawn_mortal(app, mortal_model_path, inference_backend),
+        DeadProcess::Mortal => {
+            PythonProcess::spawn_mortal(app, mortal_model_path, inference_backend)
+        }
     };
     match spawn_result {
         Ok(new_proc) => {
@@ -771,10 +769,7 @@ mod tests {
         // mortal 系は全て "inference" (フロント側 AppError.type の語彙)
         assert_eq!(CycleError::MortalTimeout.kind(), "inference");
         assert_eq!(CycleError::MortalDied.kind(), "inference");
-        assert_eq!(
-            CycleError::MortalParseFail("x".into()).kind(),
-            "inference"
-        );
+        assert_eq!(CycleError::MortalParseFail("x".into()).kind(), "inference");
         assert_eq!(CycleError::MortalInvalid("x".into()).kind(), "inference");
     }
 
@@ -803,14 +798,14 @@ mod tests {
         let died = map_recognition_error(PythonProcError::Terminated);
         assert!(matches!(died, CycleError::RecognitionDied));
 
-        let broken_pipe = map_recognition_error(PythonProcError::SpawnFailed(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"),
-        ));
+        let broken_pipe = map_recognition_error(PythonProcError::SpawnFailed(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "pipe",
+        )));
         assert!(matches!(broken_pipe, CycleError::RecognitionDied));
 
-        let other = map_recognition_error(PythonProcError::SpawnFailed(std::io::Error::other(
-            "boom",
-        )));
+        let other =
+            map_recognition_error(PythonProcError::SpawnFailed(std::io::Error::other("boom")));
         assert!(matches!(other, CycleError::RecognitionIo(_)));
     }
 
@@ -822,9 +817,10 @@ mod tests {
         let died = map_mortal_error(PythonProcError::Terminated);
         assert!(matches!(died, CycleError::MortalDied));
 
-        let broken_pipe = map_mortal_error(PythonProcError::SpawnFailed(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"),
-        ));
+        let broken_pipe = map_mortal_error(PythonProcError::SpawnFailed(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "pipe",
+        )));
         assert!(matches!(broken_pipe, CycleError::MortalDied));
     }
 }
