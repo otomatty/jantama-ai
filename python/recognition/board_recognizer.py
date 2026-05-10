@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from pathlib import Path
 from typing import Any
@@ -67,7 +68,11 @@ class BoardRecognizer:
         OCR / wind は単一マッチなので confidence 計算には混ぜず、内部ログで
         出すに留める。0.0 は「何も認識できなかった」を意味する。
         """
-        tenhou: dict[str, Any] = dict(DEFAULT_TENHOU_JSON)
+        # deepcopy: 浅いコピーだと dora_indicators 等のリストが DEFAULT 共有のまま残り、
+        # 将来呼び出し側が `tenhou["scores"].append(...)` 等で in-place 変更すると
+        # 既定値が汚染される (CodeRabbit nit on PR #44)。フレームあたり 1 dict のコピーは
+        # 計測誤差レベル。
+        tenhou: dict[str, Any] = copy.deepcopy(DEFAULT_TENHOU_JSON)
         confidence = 0.0
 
         if bgr_frame is None or bgr_frame.size == 0:

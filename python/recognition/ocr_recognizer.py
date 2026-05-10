@@ -79,14 +79,18 @@ def _crop_roi(bgr_frame: np.ndarray, roi: RoiRect) -> np.ndarray | None:
 
 
 def _preprocess_for_ocr(crop_bgr: np.ndarray) -> np.ndarray:
-    """OCR 前処理: グレースケール化 + 2 値化 + 軽く拡大して可読性を上げる。"""
+    """OCR 前処理: 軽く拡大 → グレースケール化 → 2 値化 (gemini medium on PR #44)。
+
+    リサイズは 2 値化前に行う。2 値化後にリサイズすると階段状のジャギーが
+    残って Tesseract の細い線の読み取り精度が落ちるため。
+    """
+    h, w = crop_bgr.shape[:2]
+    if h < 32:
+        scale = max(1, 32 // max(1, h))
+        crop_bgr = cv2.resize(crop_bgr, (w * scale, h * scale), interpolation=cv2.INTER_LINEAR)
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
     # 雀魂 UI は概ね白文字 / 黒背景 or 暗文字 / 明背景。`THRESH_OTSU` で自動 2 値化。
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    h, w = binary.shape[:2]
-    if h < 32:
-        scale = max(1, 32 // max(1, h))
-        binary = cv2.resize(binary, (w * scale, h * scale), interpolation=cv2.INTER_LINEAR)
     return binary
 
 
@@ -146,6 +150,12 @@ def recognize_scores(
 ) -> list[int] | None:
     """点棒 ROI を 4 等分して 4 家分の持ち点を返す (座順: 東→南→西→北)。
 
+    レイアウト前提: 1 つの矩形に 4 家分が水平に並んだ「点棒帯」を想定
+    (gemini medium on PR #44)。雀魂の標準対戦画面はスコア表示が卓中央の
+    十字配置 (上下左右に 1 つずつ) なので、その場合はユーザがオーバーレイ
+    UI 経由で別途並べて表示するスキンを使うか、将来 issue で 4 個独立した
+    ROI (`score_self/right/across/left`) に分割する。
+
     どれか 1 つでも OCR 失敗 / パース失敗があれば `None` を返す
     (一部だけ欠けた scores 配列を tenhou_json に流すと self_wind_index で
     異常値を引いて Mortal が誤動作する恐れがあるため、all-or-nothing)。
@@ -159,8 +169,6 @@ def recognize_scores(
     h, w = crop.shape[:2]
     if w < 4:
         return None
-    # 水平方向に 4 等分する前提。雀魂レイアウトでスコア表示が縦並びの場合は
-    # 今後 ROI 設計を見直す。とりあえず水平並びを正準とする。
     seg_w = w // 4
     scores: list[int] = []
     for i in range(4):
@@ -182,6 +190,10 @@ def recognize_scores(
             value = sign * int(digits)
         except ValueError:
             return None
+        # 雀魂の点棒は 100 点単位。OCR 誤読 (25000 → 2500 / 2500 → 250 など桁落ち)
+        # の sanity check として 100 で割り切れない値は失敗扱い (gemini medium on PR #44)。
+        if value % 100 != 0:
+            return None
         scores.append(value)
     return scores
 
@@ -190,7 +202,13 @@ def recognize_turn(
     bgr_frame: np.ndarray,
     turn_roi: RoiRect | None,
 ) -> int | None:
-    """巡目カウンタ ROI を読み 1〜18 の整数を返す。範囲外 / 失敗時は `None`。"""
+    """巡目カウンタ ROI を読み整数を返す。範囲外 / 失敗時は `None`。
+
+    上限は流局時の最大巡数 + 副露でツモ順がずれて伸びるケースを考慮して 25
+    までを許容 (gemini medium on PR #44)。理論最大は配牌後 70 山牌 / 4 家 ≈
+    17-18 巡だが、リンシャン牌・カンドラ複数発動・副露によるツモ飛ばし等で
+    25 程度までは現実的に到達し得る。
+    """
     if turn_roi is None:
         return None
     crop = _crop_roi(bgr_frame, turn_roi)
@@ -207,7 +225,7 @@ def recognize_turn(
         value = int(digits)
     except ValueError:
         return None
-    if not 1 <= value <= 18:
+    if not 1 <= value <= 25:
         return None
     return value
 
