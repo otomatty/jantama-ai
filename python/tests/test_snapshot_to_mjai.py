@@ -169,6 +169,7 @@ def test_self_tsumo_then_dahai_cycle() -> None:
     """受け入れ基準: 連続スナップショット (start_kyoku → tsumo → dahai × 4 周)。
 
     自家視点でツモ → 打牌を 4 周繰り返した場合に正しく event 列が生成されること。
+    ツモ牌と同じ牌を打牌するので tsumogiri=True が立つ。
     """
     conv = SnapshotToMjaiConverter()
     s0 = _base_snapshot()
@@ -193,9 +194,28 @@ def test_self_tsumo_then_dahai_cycle() -> None:
         assert ev_dahai[0]["type"] == "dahai"
         assert ev_dahai[0]["actor"] == 0
         assert ev_dahai[0]["pai"] == tile
-        assert ev_dahai[0]["tsumogiri"] is False
+        # ツモった牌をそのまま切ったので tsumogiri=True (gemini Medium on PR #51)。
+        assert ev_dahai[0]["tsumogiri"] is True
 
         current = s_dahai
+
+
+def test_self_dahai_tedashi_when_different_from_tsumo() -> None:
+    """ツモ牌と異なる牌を切った場合は tsumogiri=False (= 手出し)。"""
+    conv = SnapshotToMjaiConverter()
+    s0 = _base_snapshot()
+    conv.convert(s0)
+    s_tsumo = _add_self_tsumo(s0, "1s")  # 1s をツモ
+    conv.convert(s_tsumo)
+    # 手から 9m を切る (1s は手に残る)。
+    s_dahai = copy.deepcopy(s_tsumo)
+    s_dahai["hand"].remove("9m")
+    s_dahai["river"].append({"player": 0, "tile": "9m", "tedashi": True})
+    events = conv.convert(s_dahai)
+    assert len(events) == 1
+    assert events[0]["type"] == "dahai"
+    assert events[0]["pai"] == "9m"
+    assert events[0]["tsumogiri"] is False
 
 
 def test_red_5_tsumo_is_converted_to_5mr() -> None:
@@ -209,16 +229,41 @@ def test_red_5_tsumo_is_converted_to_5mr() -> None:
 
 
 def test_other_player_dahai_is_emitted() -> None:
+    """他家 dahai の前にはプレースホルダ tsumo が挿入される (mjai 仕様)。"""
     conv = SnapshotToMjaiConverter()
     s0 = _base_snapshot()
     conv.convert(s0)
     # 下家 (player=1) が捨てる。
     s1 = _add_river(s0, player=1, tile="9m")
     events = conv.convert(s1)
-    assert len(events) == 1
-    assert events[0]["type"] == "dahai"
+    types = [e["type"] for e in events]
+    assert types == ["tsumo", "dahai"]
     assert events[0]["actor"] == 1
-    assert events[0]["pai"] == "9m"
+    assert events[0]["pai"] == "?"  # 他家ツモは観測不能
+    assert events[1]["actor"] == 1
+    assert events[1]["pai"] == "9m"
+
+
+def test_river_events_preserve_chronological_order_across_players() -> None:
+    """複数家が同フレームに打牌した場合、player 番号順ではなく出現順で発行される。"""
+    conv = SnapshotToMjaiConverter()
+    s0 = _base_snapshot()
+    conv.convert(s0)
+    # 出現順 (時系列): 下家(1) → 対面(2) → 上家(3) → 自家(0)
+    s1 = copy.deepcopy(s0)
+    s1["river"] = [
+        {"player": 1, "tile": "9m", "tedashi": True},
+        {"player": 2, "tile": "8m", "tedashi": True},
+        {"player": 3, "tile": "7m", "tedashi": True},
+        {"player": 0, "tile": "6m", "tedashi": True},
+    ]
+    # 自家の打牌前にツモが必要なので hand の不整合を避けるため手牌を 14 → 13 に。
+    s1["hand"] = list(s1["hand"])
+    s1["hand"].remove("6m" if "6m" in s1["hand"] else s1["hand"][0])
+    events = conv.convert(s1)
+    # 各 dahai の actor 順序が river 配列順そのまま (player 番号順 0,1,2,3 ではない)。
+    dahai_actors = [e["actor"] for e in events if e["type"] == "dahai"]
+    assert dahai_actors == [1, 2, 3, 0]
 
 
 # ----------------------- reach -----------------------
@@ -232,11 +277,13 @@ def test_riichi_declaration_emits_reach_dahai_accepted() -> None:
     s1 = _add_river(s0, player=2, tile="5z", riichi=True)
     events = conv.convert(s1)
     types = [e["type"] for e in events]
-    assert types == ["reach", "dahai", "reach_accepted"]
+    # 他家のため先頭にプレースホルダ tsumo が入る。
+    assert types == ["tsumo", "reach", "dahai", "reach_accepted"]
     assert events[0]["actor"] == 2
     assert events[1]["actor"] == 2
-    assert events[1]["pai"] == "5z"
     assert events[2]["actor"] == 2
+    assert events[2]["pai"] == "5z"
+    assert events[3]["actor"] == 2
 
 
 def test_reach_is_not_re_emitted_for_subsequent_riichi_tiles() -> None:
@@ -253,7 +300,8 @@ def test_reach_is_not_re_emitted_for_subsequent_riichi_tiles() -> None:
     types = [e["type"] for e in events]
     assert "reach" not in types
     assert "reach_accepted" not in types
-    assert types == ["dahai"]
+    # 他家のため tsumo プレースホルダが入った後 dahai。
+    assert types == ["tsumo", "dahai"]
 
 
 # ----------------------- melds (pon/chi/kan) -----------------------
@@ -284,11 +332,11 @@ def test_pon_meld_emits_pon_event() -> None:
     assert e["consumed"] == ["5m", "5m"]
 
 
-def test_chi_meld_emits_chi_event() -> None:
+def test_chi_meld_emits_chi_event_with_called_index_leftmost() -> None:
+    """called_index=0: 左端の牌 (3p) を鳴いた → pai=3p, consumed=[4p,5p]。"""
     conv = SnapshotToMjaiConverter()
     s0 = _base_snapshot()
     conv.convert(s0)
-    # 自家 (player=0) が上家 (from=3) から 3p を chi。
     s1 = copy.deepcopy(s0)
     s1["melds"] = [
         {
@@ -296,6 +344,7 @@ def test_chi_meld_emits_chi_event() -> None:
             "type": "chi",
             "tiles": ["3p", "4p", "5p"],
             "from": 3,
+            "called_index": 0,
         }
     ]
     events = conv.convert(s1)
@@ -306,6 +355,66 @@ def test_chi_meld_emits_chi_event() -> None:
     assert e["target"] == 3  # (0 + 3) % 4 = 3
     assert e["pai"] == "3p"
     assert e["consumed"] == ["4p", "5p"]
+
+
+def test_chi_meld_called_index_middle() -> None:
+    """called_index=1: 中央の牌 (4m) を鳴いた → pai=4m, consumed=[3m,5m] (CodeRabbit Critical)。"""
+    conv = SnapshotToMjaiConverter()
+    s0 = _base_snapshot()
+    conv.convert(s0)
+    s1 = copy.deepcopy(s0)
+    s1["melds"] = [
+        {
+            "player": 0,
+            "type": "chi",
+            "tiles": ["3m", "4m", "5m"],
+            "from": 3,
+            "called_index": 1,
+        }
+    ]
+    events = conv.convert(s1)
+    assert events[0]["pai"] == "4m"
+    assert events[0]["consumed"] == ["3m", "5m"]
+
+
+def test_chi_meld_called_index_rightmost() -> None:
+    """called_index=2: 右端の牌 (9p) を鳴いた → pai=9p, consumed=[7p,8p]。"""
+    conv = SnapshotToMjaiConverter()
+    s0 = _base_snapshot()
+    conv.convert(s0)
+    s1 = copy.deepcopy(s0)
+    s1["melds"] = [
+        {
+            "player": 0,
+            "type": "chi",
+            "tiles": ["7p", "8p", "9p"],
+            "from": 3,
+            "called_index": 2,
+        }
+    ]
+    events = conv.convert(s1)
+    assert events[0]["pai"] == "9p"
+    assert events[0]["consumed"] == ["7p", "8p"]
+
+
+def test_chi_meld_missing_called_index_falls_back_to_zero() -> None:
+    """called_index 欠落 (旧 schema) では tiles[0] にフォールバック。"""
+    conv = SnapshotToMjaiConverter()
+    s0 = _base_snapshot()
+    conv.convert(s0)
+    s1 = copy.deepcopy(s0)
+    s1["melds"] = [
+        {
+            "player": 0,
+            "type": "chi",
+            "tiles": ["3p", "4p", "5p"],
+            "from": 3,
+            # called_index 未指定
+        }
+    ]
+    events = conv.convert(s1)
+    assert events[0]["pai"] == "3p"
+    assert events[0]["consumed"] == ["4p", "5p"]
 
 
 def test_minkan_emits_daiminkan_event() -> None:
@@ -405,6 +514,38 @@ def test_kyoku_change_emits_new_start_kyoku() -> None:
     assert events[0]["kyoku"] == 2
     # 北家視点で oya は (4 - 3) % 4 = 1。
     assert events[0]["oya"] == 1
+
+
+def test_kyoku_fallback_uses_fixed_1_when_no_round_label() -> None:
+    """round_label が無い場合、kyoku は 1 で固定 (gemini Medium on PR #51)。
+
+    自風 index から kyoku を推定するのは不正確 (南家でも東2局とは限らない)
+    なので、確定情報無しでは 1 にフォールバックする。
+    """
+    conv = SnapshotToMjaiConverter()
+    s = _base_snapshot()
+    s.pop("round_label", None)
+    s["self_wind"] = "南"
+    events = conv.convert(s)
+    assert events[0]["type"] == "start_kyoku"
+    assert events[0]["kyoku"] == 1
+    # oya は self_wind から算出されるのでこちらは変わる (南家 → oya=3)。
+    assert events[0]["oya"] == 3
+
+
+def test_start_kyoku_with_14_tile_hand_emits_followup_tsumo() -> None:
+    """14 牌で局を観測した場合、start_kyoku (13 牌) + 続く tsumo (14 枚目) を発行。
+
+    14 牌目を切り捨てるだけだと mjai ストリーム上で消失する (gemini Medium on PR #51)。
+    """
+    conv = SnapshotToMjaiConverter()
+    s = _base_snapshot()
+    s["hand"] = list(s["hand"]) + ["1s"]  # 14 牌目を追加
+    events = conv.convert(s)
+    assert len(events) == 2
+    assert events[0]["type"] == "start_kyoku"
+    assert len(events[0]["tehais"][0]) == 13
+    assert events[1] == {"type": "tsumo", "actor": 0, "pai": "1s"}
 
 
 def test_no_redundant_start_kyoku_when_signature_unchanged() -> None:

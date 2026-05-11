@@ -150,6 +150,31 @@ def _river_signature(river: Any, player: int) -> list[tuple[str, bool]]:
     return out
 
 
+def _river_chronological(river: Any) -> list[tuple[int, str, bool]]:
+    """河全体を (player, tile, riichi) の時系列リストに正規化する。
+
+    `tenhou_json["river"]` は recognition 側がプレイヤーをまとめて 1 本の
+    リストに並べる仕様だが、出現順 (= 認識結果での配列順) を保つことで
+    時系列順を再現する。プレイヤー番号でループしてしまうと、複数家が
+    挟まる差分で順序が壊れる (gemini-code-assist High on PR #51)。
+    """
+    out: list[tuple[int, str, bool]] = []
+    if not isinstance(river, list):
+        return out
+    for entry in river:
+        if not isinstance(entry, dict):
+            continue
+        player = entry.get("player")
+        if not isinstance(player, int) or not 0 <= player <= 3:
+            continue
+        tile = entry.get("tile")
+        if not isinstance(tile, str):
+            continue
+        riichi = bool(entry.get("riichi", False))
+        out.append((player, tile, riichi))
+    return out
+
+
 def _melds_for_player(melds: Any, player: int) -> list[dict[str, Any]]:
     """指定 player の副露リストを出現順で抜き出す。"""
     out: list[dict[str, Any]] = []
@@ -197,10 +222,18 @@ def _build_meld_event(meld: dict[str, Any]) -> dict[str, Any] | None:
     if mtype == "chi":
         if len(tiles) < 3:
             return None
-        # 雀魂 UI は鳴いた牌を一番左に置く規約だが、recognition 側で
-        # 整列保証されているとは限らない。consumed = tiles の残り 2 牌。
-        called = tiles[0]
-        consumed = tiles[1:]
+        # `tiles` は副露牌を昇順に並べた配列 (melds_recognizer 規約)。
+        # 鳴いた牌は `called_index` (0/1/2 のいずれか) で示される。
+        # 例: 4-5-6 と並ぶ中の 5 を鳴いた場合 called_index=1 → pai="5m"
+        # called_index 欠落の旧スキーマ互換: 範囲外 / 未指定なら 0 にフォールバック。
+        called_idx_raw = meld.get("called_index")
+        called_idx = (
+            called_idx_raw
+            if isinstance(called_idx_raw, int) and 0 <= called_idx_raw < len(tiles)
+            else 0
+        )
+        called = tiles[called_idx]
+        consumed = [t for i, t in enumerate(tiles) if i != called_idx]
         return {
             "type": "chi",
             "actor": actor,
@@ -278,9 +311,12 @@ class SnapshotToMjaiConverter:
         self._initial_self_hand: list[str] = []
         # 直前フレームの自家手牌 (Counter)。tsumo 検知に使う。
         self._prev_self_hand: Counter[str] = Counter()
-        # プレイヤー別: 既に dahai event として発行済みの river 長さ。
-        # 次フレームでこの長さを超えた分が新しい捨牌。
-        self._river_emitted_len: list[int] = [0, 0, 0, 0]
+        # 直前に自家がツモった牌 (mjai 表記)。次フレームで dahai が起きたとき
+        # ツモ切り (tsumogiri) 判定に使う (gemini-code-assist Medium on PR #51)。
+        self._last_self_tsumo_pai: str | None = None
+        # 河全体で既に dahai event として発行済みのエントリ数 (= 河の長さ)。
+        # 時系列順を保つため、プレイヤー別ではなく単一カウンタで管理する。
+        self._river_emitted_total: int = 0
         # プレイヤー別: 既に reach event を発行済みか。雀魂の河は riichi 宣言牌
         # を横向きで表現し、リーチ後も継続して残るため、フラグで一度きりに絞る。
         self._reach_emitted: list[bool] = [False, False, False, False]
@@ -301,7 +337,8 @@ class SnapshotToMjaiConverter:
         self._kyoku_signature = None
         self._initial_self_hand = []
         self._prev_self_hand = Counter()
-        self._river_emitted_len = [0, 0, 0, 0]
+        self._last_self_tsumo_pai = None
+        self._river_emitted_total = 0
         self._reach_emitted = [False, False, False, False]
         self._melds_emitted = [[], [], [], []]
         self._kyoku_started = False
@@ -332,7 +369,7 @@ class SnapshotToMjaiConverter:
         # 1. 局またぎ検出 (round_label or self_wind/round_wind 変化、または初回)。
         new_sig = self._kyoku_signature_of(snapshot)
         if not self._kyoku_started or new_sig != self._kyoku_signature:
-            events.append(self._build_start_kyoku(snapshot))
+            events.extend(self._build_start_kyoku_events(snapshot))
             self._reset_kyoku_state(snapshot, new_sig)
             return events
 
@@ -343,13 +380,17 @@ class SnapshotToMjaiConverter:
         if sum(cur_hand.values()) == 14 and sum(self._prev_self_hand.values()) == 13:
             if sum(gained.values()) == 1 and sum(lost.values()) == 0:
                 tsumo_tile = next(iter(gained.elements()))
+                pai_mjai = tenhou_pai_to_mjai(tsumo_tile)
                 events.append(
                     {
                         "type": "tsumo",
                         "actor": 0,
-                        "pai": tenhou_pai_to_mjai(tsumo_tile),
+                        "pai": pai_mjai,
                     }
                 )
+                # 直後の dahai が同じ牌なら tsumogiri (ツモ切り) と判定するために
+                # 記憶しておく。打牌したら _diff_rivers 側でクリアする。
+                self._last_self_tsumo_pai = pai_mjai
             else:
                 logger.warning(
                     "self hand grew by %d but multiset diff is ambiguous "
@@ -364,6 +405,7 @@ class SnapshotToMjaiConverter:
         events.extend(meld_events)
 
         # 4. 河差分 (新規捨牌 → dahai、riichi フラグ → reach + reach_accepted)。
+        # 時系列順を維持するため、河全体を 1 本の append-only 列として扱う。
         river_events = self._diff_rivers(snapshot)
         events.extend(river_events)
 
@@ -375,8 +417,11 @@ class SnapshotToMjaiConverter:
         """局を一意に同定する signature を作る。
 
         round_label があれば (bakaze, kyoku) を使う。無ければ
-        (round_wind, self_wind_index) を使う (= 局またぎ精度は落ちるが
-        場風変化なら拾える)。oya は self_wind から算出。
+        kyoku は固定 1 とし、(bakaze, oya) の組み合わせ変化で局またぎを
+        検出する (gemini-code-assist Medium on PR #51: 自風 index から
+        kyoku を推定するのは不正確 — 例えば自分が南家でも 東2局 と限らず、
+        東3局・東4局でも自風は順送りに南家となるケースがある)。
+        oya は self_wind から算出。
         """
         round_wind = snapshot.get("round_wind", "東")
         self_wind = snapshot.get("self_wind", "東")
@@ -388,17 +433,15 @@ class SnapshotToMjaiConverter:
         parsed = parse_round_label(round_label) if isinstance(round_label, str) else None
         if parsed is not None:
             bakaze, kyoku_num = parsed
-        else:
-            # round_label が無い場合は turn=1 かつ手牌 13 枚なら "新局" と推定したい
-            # が、確定情報が無いので bakaze + self_wind index を擬似 kyoku key
-            # とする (= 同じ場風で席が変わったら別局扱い)。
-            self_idx = _WIND_TO_INDEX.get(self_wind if isinstance(self_wind, str) else "東", 0)
-            kyoku_num = max(1, min(4, self_idx + 1))
 
         return (bakaze, kyoku_num, oya)
 
-    def _build_start_kyoku(self, snapshot: dict[str, Any]) -> dict[str, Any]:
-        """現スナップショットから start_kyoku event を構築する。
+    def _build_start_kyoku_events(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+        """現スナップショットから start_kyoku (+ 必要なら直後の tsumo) を構築する。
+
+        14 牌の状態で最初に観測した (= 既に親のツモ番) ケースは start_kyoku を
+        13 牌で発行し、続けて 14 枚目を `tsumo` イベントとして発行することで
+        手牌の整合性を保つ (gemini-code-assist Medium on PR #51)。
 
         他家手牌は観測不能なので "?" 13 枚で埋める (Phase D4 で libriichi
         側がどう扱うかに合わせる。フォーマット上はこのプレースホルダで通る
@@ -429,17 +472,22 @@ class SnapshotToMjaiConverter:
             self_hand = [tenhou_pai_to_mjai(t) for t in self_hand_raw if isinstance(t, str)]
         else:
             self_hand = []
-        # start_kyoku は手牌 13 枚が前提。配牌時点を取れていれば 13 枚で来るが、
-        # 既にツモ後 (14 枚) のフレームを最初に観測した場合は末尾 1 枚を捨てて 13 枚にする。
-        # 逆に 13 枚未満ならフォールバックの "?" でパディング。
+        # start_kyoku は手牌 13 枚が前提。14 枚以上のフレームを最初に観測した
+        # 場合は末尾 1 枚を取り出して直後の `tsumo` event とする。13 枚未満なら
+        # 観測不能な "?" でパディング。
+        extra_tsumo_pai: str | None = None
         if len(self_hand) >= 14:
+            extra_tsumo_pai = self_hand[13]
             self_hand = self_hand[:13]
         while len(self_hand) < 13:
             self_hand.append("?")
 
         tehais: list[list[str]] = [self_hand, ["?"] * 13, ["?"] * 13, ["?"] * 13]
 
-        return {
+        # TODO(#19 followup): honba (本場) と kyotaku (供託リーチ棒) は現状
+        # スナップショットに含まれないため 0 固定。Phase D4 でスナップショット
+        # スキーマ側に追加され次第ここから読み取る。
+        start_kyoku: dict[str, Any] = {
             "type": "start_kyoku",
             "bakaze": bakaze,
             "dora_marker": dora_marker,
@@ -450,6 +498,13 @@ class SnapshotToMjaiConverter:
             "scores": scores,
             "tehais": tehais,
         }
+        events: list[dict[str, Any]] = [start_kyoku]
+        if extra_tsumo_pai is not None:
+            # 14 牌目を ツモ済み牌として明示。actor は自家 (0) — 親かどうかは
+            # 別 (oya=0 なら東家ツモ、それ以外は何らかの理由で観測時点で 14 牌
+            # ある = 既にツモ済み)。
+            events.append({"type": "tsumo", "actor": 0, "pai": extra_tsumo_pai})
+        return events
 
     def _reset_kyoku_state(
         self,
@@ -465,19 +520,26 @@ class SnapshotToMjaiConverter:
         else:
             self._initial_self_hand = []
         self._prev_self_hand = _hand_counter(snapshot.get("hand"))
+        # 局開始時点で 14 牌だった場合 `_build_start_kyoku_events` 側で末尾 1 枚を
+        # tsumo event にしているため、last_self_tsumo にも反映して次フレームの
+        # tsumogiri 判定に効かせる。
+        if sum(self._prev_self_hand.values()) >= 14 and isinstance(hand, list) and hand:
+            last_raw = hand[-1] if isinstance(hand[-1], str) else None
+            self._last_self_tsumo_pai = tenhou_pai_to_mjai(last_raw) if last_raw else None
+        else:
+            self._last_self_tsumo_pai = None
         # 局開始時点で既に河に牌があってもよい (途中フレームから捕捉した場合)。
-        # その場合は「既に発行済み」扱いにして dahai を二重発行しない。
-        self._river_emitted_len = [
-            len(_river_signature(snapshot.get("river"), p)) for p in range(4)
-        ]
+        # その場合は「既に発行済み」扱いにして dahai を二重発行しない。河は単一
+        # リストで時系列管理するため total 長さだけ覚える。
+        river_chrono = _river_chronological(snapshot.get("river"))
+        self._river_emitted_total = len(river_chrono)
         # reach も同様: 局またぎでリセット (前局のフラグを引きずらない)。
         # ただし新スナップショット時点で riichi が立っていれば、それは前局からの
         # 持ち越しではなく単に「途中フレームから観測した」ケース。reach event は
         # 過去のものなので発行せず、emitted=True に倒す。
         new_reach = [False, False, False, False]
-        for p in range(4):
-            tiles = _river_signature(snapshot.get("river"), p)
-            if any(r for _, r in tiles):
+        for p, _t, r in river_chrono:
+            if r:
                 new_reach[p] = True
         self._reach_emitted = new_reach
         # 副露も同様に「既に発行済み」扱い。
@@ -486,48 +548,71 @@ class SnapshotToMjaiConverter:
         ]
 
     def _diff_rivers(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-        """4 家の河を前回観測長さと比較し、新しい dahai/reach event を発行する。"""
+        """河全体の append 部分から dahai/reach event を時系列順で発行する。
+
+        プレイヤー番号で個別 loop すると複数家が挟まる差分で順序が壊れるため、
+        `tenhou_json["river"]` の出現順 (= 認識順 = 時系列順) を 1 本のリスト
+        として扱う (gemini-code-assist High on PR #51)。
+
+        他家 (actor 1/2/3) の dahai 前には placeholder の `tsumo` event を
+        差し込む (mjai は dahai 直前に tsumo/鳴きが必要なため)。pai は観測
+        不能なので "?" とする。鳴いた牌を打牌するケース等もカバーしきれない
+        が、Mortal は他家ツモ pai を直接は使わない (隠匿情報) ので許容する。
+        """
         events: list[dict[str, Any]] = []
-        for player in range(4):
-            tiles = _river_signature(snapshot.get("river"), player)
-            prev_len = self._river_emitted_len[player]
-            if len(tiles) < prev_len:
-                # 鳴かれて河が縮んだ等、整合性が崩れた可能性。
-                # 縮んだぶんは「既知のものは消えた」と解釈し、emitted を新長さまで戻す。
-                logger.warning(
-                    "river of player %d shrunk %d -> %d; resyncing emitted length",
-                    player,
-                    prev_len,
-                    len(tiles),
+        chrono = _river_chronological(snapshot.get("river"))
+        prev_total = self._river_emitted_total
+        if len(chrono) < prev_total:
+            # 鳴かれて河が縮んだ等、整合性が崩れた可能性。emitted を新長さまで戻し
+            # 重複発行を防ぐ。
+            logger.warning(
+                "total river length shrunk %d -> %d; resyncing emitted length",
+                prev_total,
+                len(chrono),
+            )
+            self._river_emitted_total = len(chrono)
+            return events
+
+        new_entries = chrono[prev_total:]
+        for player, tile, riichi in new_entries:
+            pai_mjai = tenhou_pai_to_mjai(tile)
+            # 他家 dahai 前のプレースホルダ tsumo (自家ツモは _convert_inner で発行済)。
+            if player != 0:
+                events.append({"type": "tsumo", "actor": player, "pai": "?"})
+
+            # tsumogiri 判定: 自家直前ツモ牌 (mjai 表記) と一致したらツモ切り。
+            if player == 0 and self._last_self_tsumo_pai is not None:
+                tsumogiri = self._last_self_tsumo_pai == pai_mjai
+            else:
+                tsumogiri = False
+
+            if riichi and not self._reach_emitted[player]:
+                events.append({"type": "reach", "actor": player})
+                events.append(
+                    {
+                        "type": "dahai",
+                        "actor": player,
+                        "pai": pai_mjai,
+                        "tsumogiri": tsumogiri,
+                    }
                 )
-                self._river_emitted_len[player] = len(tiles)
-                continue
-            new_entries = tiles[prev_len:]
-            for tile, riichi in new_entries:
-                # 横向き = リーチ宣言牌。reach 未発行ならまず reach + reach_accepted、
-                # 続いて dahai (= リーチ宣言の打牌) を発行する。
-                if riichi and not self._reach_emitted[player]:
-                    events.append({"type": "reach", "actor": player})
-                    events.append(
-                        {
-                            "type": "dahai",
-                            "actor": player,
-                            "pai": tenhou_pai_to_mjai(tile),
-                            "tsumogiri": False,
-                        }
-                    )
-                    events.append({"type": "reach_accepted", "actor": player})
-                    self._reach_emitted[player] = True
-                else:
-                    events.append(
-                        {
-                            "type": "dahai",
-                            "actor": player,
-                            "pai": tenhou_pai_to_mjai(tile),
-                            "tsumogiri": False,
-                        }
-                    )
-            self._river_emitted_len[player] = len(tiles)
+                events.append({"type": "reach_accepted", "actor": player})
+                self._reach_emitted[player] = True
+            else:
+                events.append(
+                    {
+                        "type": "dahai",
+                        "actor": player,
+                        "pai": pai_mjai,
+                        "tsumogiri": tsumogiri,
+                    }
+                )
+
+            # 自家が打牌した直後はツモ記憶をクリア (= 次フレームで誤判定しない)。
+            if player == 0:
+                self._last_self_tsumo_pai = None
+
+        self._river_emitted_total = len(chrono)
         return events
 
     def _diff_melds(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -572,22 +657,26 @@ class SnapshotToMjaiConverter:
             return []
         events: list[dict[str, Any]] = []
         try:
-            events.append(self._build_start_kyoku(snapshot))
+            events.extend(self._build_start_kyoku_events(snapshot))
         except Exception:  # noqa: BLE001
             logger.warning("fallback start_kyoku build failed", exc_info=True)
             return []
 
-        # 河を player 単位で出現順に並べて全部 dahai に。
-        for player in range(4):
-            for tile, _riichi in _river_signature(snapshot.get("river"), player):
-                events.append(
-                    {
-                        "type": "dahai",
-                        "actor": player,
-                        "pai": tenhou_pai_to_mjai(tile),
-                        "tsumogiri": False,
-                    }
-                )
+        # 河は時系列順 (= recognition 出現順) で 1 本のリストにまとめて dahai に
+        # 変換する。プレイヤー番号ループだと実際のゲーム進行順序とずれて Mortal の
+        # 解釈を狂わせる可能性があるため (CodeRabbit nit on PR #51)。他家 dahai の
+        # 前にはプレースホルダ tsumo を差し込む。
+        for player, tile, _riichi in _river_chronological(snapshot.get("river")):
+            if player != 0:
+                events.append({"type": "tsumo", "actor": player, "pai": "?"})
+            events.append(
+                {
+                    "type": "dahai",
+                    "actor": player,
+                    "pai": tenhou_pai_to_mjai(tile),
+                    "tsumogiri": False,
+                }
+            )
 
         # 副露を player 単位で出現順に並べて mjai event 化。
         for player in range(4):
