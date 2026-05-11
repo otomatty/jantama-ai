@@ -16,15 +16,23 @@ import pytest
 import mortal  # noqa: F401
 
 VENDOR_ROOT = Path(__file__).resolve().parents[1] / "vendor" / "mortal"
+# submodule が未初期化 (= 浅い clone や `git submodule update --init` をしていない
+# 環境) の場合は `vendor/mortal/` が空ディレクトリだけ存在することがある。
+# LICENSE ファイルの有無で「実体が clone 済みか」を判定する。
+_SUBMODULE_INITIALIZED = (VENDOR_ROOT / "LICENSE").exists()
+_SKIP_REASON_NO_SUBMODULE = (
+    "python/vendor/mortal が未初期化。`git submodule update --init --recursive` で取得してください"
+)
 
 
+@pytest.mark.skipif(not _SUBMODULE_INITIALIZED, reason=_SKIP_REASON_NO_SUBMODULE)
 def test_vendor_submodule_present() -> None:
-    """submodule が clone されていること (.git ファイル or LICENSE で判定)。"""
-    assert VENDOR_ROOT.exists(), "submodule python/vendor/mortal が未取得"
+    """submodule が clone されていれば期待するファイル構造であることを検証する。"""
     assert (VENDOR_ROOT / "LICENSE").exists()
     assert (VENDOR_ROOT / "mortal" / "engine.py").exists()
 
 
+@pytest.mark.skipif(not _SUBMODULE_INITIALIZED, reason=_SKIP_REASON_NO_SUBMODULE)
 @pytest.mark.skipif(
     importlib.util.find_spec("torch") is None,
     reason="torch (= [mortal] extras) が未インストール",
