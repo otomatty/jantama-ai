@@ -23,4 +23,30 @@
 
 issue #16 (牌画像テンプレートデータの収集と整備) で配置される予定。
 それまでは空 (この `README.md` と `.gitkeep` のみ) で、`TileRecognizer` は
-警告ログを 1 回出した上で `recognize_hand` が常に `([], 0.0)` を返す。
+警告ログを 1 回出した上で `recognize_hand` / `recognize_dora` が常に
+`([], 0.0)` を返す。
+
+## 自風 / 場風ラベル (issue #12)
+
+雀魂卓上に表示される「東/南/西/北」のラベル画像は牌画像とは別系統。
+`templates/winds/` 配下に以下を配置する:
+
+```text
+winds/east.png   自風 / 場風ラベル「東」
+winds/south.png  「南」
+winds/west.png   「西」
+winds/north.png  「北」
+```
+
+形式は牌テンプレと同じ (グレースケール、サイズ統一推奨)。4 枚揃わないと
+`WindRecognizer` は無効化される (= スタブ値「東」にフォールバック)。
+
+## Tesseract OCR (issue #12)
+
+局名 (`round_label`)・点棒 (`scores`)・巡目 (`turn`) は `pytesseract` 経由で
+Tesseract OCR を呼ぶ。Tesseract バイナリ本体は別途インストールが必要。
+
+- Windows: <https://github.com/UB-Mannheim/tesseract/wiki> から installer を入れ、
+  `tesseract.exe` を PATH に追加。`jpn` 言語パックも一緒に入れる。
+- Tesseract 不在時は `ocr_recognizer` が警告ログを 1 度出し、該当フィールドは
+  既定値 (`stub_tenhou_json()` 由来) を使う。

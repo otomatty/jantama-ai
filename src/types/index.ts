@@ -44,9 +44,11 @@ export type RoiRegionId =
   | "river_across"
   | "river_left"
   | "round_info"
-  | "self_wind";
+  | "self_wind"
+  | "scores"
+  | "turn_counter";
 
-/** ROI キャリブレーション結果 (issue #10)。未指定領域は `null`。 */
+/** ROI キャリブレーション結果 (issue #10 / #12)。未指定領域は `null`。 */
 export interface RoiCalibration {
   hand: RoiRect | null;
   doras: RoiRect | null;
@@ -58,6 +60,10 @@ export interface RoiCalibration {
   };
   round_info: RoiRect | null;
   self_wind: RoiRect | null;
+  /** 4 家分の点棒数字が並んだ帯。内側を 4 等分して OCR (issue #12)。 */
+  scores: RoiRect | null;
+  /** 巡目カウンタの数字 (issue #12)。 */
+  turn_counter: RoiRect | null;
 }
 
 export const EMPTY_ROI_CALIBRATION: RoiCalibration = {
@@ -66,6 +72,8 @@ export const EMPTY_ROI_CALIBRATION: RoiCalibration = {
   rivers: { self: null, right: null, across: null, left: null },
   round_info: null,
   self_wind: null,
+  scores: null,
+  turn_counter: null,
 };
 
 export interface AppSettings {

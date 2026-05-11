@@ -922,6 +922,8 @@ fn sanitize_roi_calibration(src: &RoiCalibration) -> RoiCalibration {
         },
         round_info: sanitize_opt_rect(src.round_info),
         self_wind: sanitize_opt_rect(src.self_wind),
+        scores: sanitize_opt_rect(src.scores),
+        turn_counter: sanitize_opt_rect(src.turn_counter),
     }
 }
 
@@ -1134,6 +1136,9 @@ mod tests {
         roi.rivers.right = Some(bad_overflow);
         roi.round_info = Some(good);
         roi.self_wind = None;
+        // issue #12: scores / turn_counter も同じく無効値は落とす
+        roi.scores = Some(bad_negative);
+        roi.turn_counter = Some(good);
 
         let cleaned = sanitize_roi_calibration(&roi);
         assert!(cleaned.hand.is_some());
@@ -1142,5 +1147,10 @@ mod tests {
         assert!(cleaned.rivers.right.is_none(), "x+w > 1.0 must be dropped");
         assert!(cleaned.round_info.is_some());
         assert!(cleaned.self_wind.is_none());
+        assert!(
+            cleaned.scores.is_none(),
+            "scores with negative x must be dropped"
+        );
+        assert!(cleaned.turn_counter.is_some());
     }
 }
