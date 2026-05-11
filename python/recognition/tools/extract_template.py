@@ -47,11 +47,18 @@ def _parse_size(spec: str) -> tuple[int, int]:
     """`64x96` 形式の `--size` 引数を `(width, height)` に変換する。"""
     try:
         w_str, h_str = spec.lower().split("x", 1)
-        return int(w_str), int(h_str)
+        width, height = int(w_str), int(h_str)
     except (ValueError, AttributeError) as exc:
         raise argparse.ArgumentTypeError(
             f"invalid --size '{spec}', expected WxH (e.g. 64x96)"
         ) from exc
+    # cv2.resize は (0, _) や負値を渡すと cv2.error を投げ、main の except では
+    # 拾えない。argparse 段階で弾いておけば通常の利用者向けエラーで返せる。
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(
+            f"--size dimensions must be positive, got {width}x{height}"
+        )
+    return width, height
 
 
 def extract(

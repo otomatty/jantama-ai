@@ -122,7 +122,7 @@ issue #16 の本文では「横向き版を 90 度回転で生成」「縮小サ
        --out python/recognition/templates --size 64x96
    ```
 
-   - 第 2 引数は `1m`〜`7z` / `winds/east` / `actions/chi` のいずれかの牌コード。
+   - 第 2 引数は `1m..9m,0m,1p..9p,0p,1s..9s,0s,1z..7z` / `winds/<east|south|west|north>` / `actions/<chi|pon|kan|riichi|tsumo|ron|pass>` のいずれか (`0m/0p/0s` は赤 5)。
    - サブカテゴリは `winds/east` のように `/` 区切りで指定すれば
      `templates/winds/east.png` に保存される。
    - `--size 64x96` を指定するとグレースケール化後にリサイズして保存する。
