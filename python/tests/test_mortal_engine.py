@@ -105,6 +105,23 @@ def test_build_engine_missing_model_exits(monkeypatch: pytest.MonkeyPatch) -> No
     assert excinfo.value.code == 2
 
 
+def test_build_engine_stub_env_empty_string_not_triggered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`JANTAMA_STUB=""` は stub モードを発火しない (== "1" 厳密一致が契約)。
+
+    Rust 側 `spawn_mortal` が、実モデル指定時に親プロセスから継承された
+    `JANTAMA_STUB=1` を空文字列で上書きすることで stub を抑止する設計
+    (PR #50 codex P1)。本テストはその上書き契約 (= 空文字列なら stub に
+    落ちない) が Python 側で保証されていることを検証する。
+    """
+    monkeypatch.setenv("JANTAMA_STUB", "")
+    # `--model` 未指定なので stub にならなければ SystemExit(2) になるはず。
+    with pytest.raises(SystemExit) as excinfo:
+        _build_engine(_make_args(model=None, backend="cpu"))
+    assert excinfo.value.code == 2
+
+
 def test_stub_flag_is_removed_from_main_parser() -> None:
     """旧 `--stub` フラグは廃止済み (main.py のソースに残っていない)。"""
     src = Path(mortal.__file__).parent / "main.py"

@@ -416,6 +416,12 @@ impl PythonProcess {
             // 後方互換のスタブモードに落とす。
             envs.push(("JANTAMA_STUB", "1"));
         } else {
+            // 親プロセスから `JANTAMA_STUB=1` が継承されている場合、Python
+            // 側 `_build_engine` が `--model` より先にこちらを見てしまい、
+            // 実モデル設定にも関わらず黙ってスタブ応答に落ちる。明示的に
+            // 空文字列で上書きし、stub 判定 (`== "1"`) を必ず外す
+            // (PR #50 codex P1)。
+            envs.push(("JANTAMA_STUB", ""));
             cmd.args.push("--model".into());
             cmd.args.push(model_path.to_string());
         }
