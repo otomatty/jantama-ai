@@ -128,14 +128,17 @@ function MainBody({ state, onOpenSettings }: { state: AppState; onOpenSettings: 
 /**
  * 盤面サマリから「今 UI が推奨表示を出す状態か」を判定する (issue #15)。
  *
- * `my_turn` が未定義 (旧 Rust ペイロード) のときは互換のため `true` 扱いし、
- * 既存挙動を壊さない。`available_actions` が空のフレームも IdleBody に倒す。
+ * `my_turn` / `available_actions` が `null` / `undefined` のとき (旧 Rust
+ * ペイロードや recognition が新スキーマ未対応の過渡期) は、Rust 側の
+ * `should_skip_inference` が「mortal を呼ぶ」側に倒しているのと整合させ、
+ * ここでも `true` 扱いで通す (= 推奨表示を抑制しない)。
+ * 明示的に `false` または空配列のときだけ IdleBody に倒す。
  */
 function isMyTurn(board: GameBoardSummary | null): boolean {
   if (!board) return false;
   if (board.my_turn === false) return false;
-  // フィールドが存在しない (旧 payload) ときは true 扱いで通す。
   const actions = board.available_actions;
-  if (actions !== undefined && actions.length === 0) return false;
+  // 明示的に空配列のときだけ抑制。`null` / `undefined` は通す。
+  if (Array.isArray(actions) && actions.length === 0) return false;
   return true;
 }

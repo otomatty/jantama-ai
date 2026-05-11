@@ -215,14 +215,21 @@ export interface GameBoardSummary {
   round_label?: string;
   /**
    * issue #15: 自分の手番か。`false` の間はフロントが推奨表示を抑制する
-   * (Rust 側でも mortal をスキップ済み)。旧 Rust ペイロード互換のため optional。
+   * (Rust 側でも mortal をスキップ済み)。
+   *
+   * `null` / `undefined` は「recognition プロセスがフィールド未対応 = 旧
+   * スキーマ」のフェイルセーフ状態を表す。Rust 側は `should_skip_inference`
+   * で `null` を「mortal を呼ぶ」側に倒すので、ここに届く `null` は
+   * 旧 schema の互換シナリオでしか発生しない。`isMyTurn` ヘルパで
+   * `true` 扱いするのと一貫させている。
    */
-  my_turn?: boolean;
+  my_turn?: boolean | null;
   /**
    * issue #15: 取り得るアクションのリスト。空 (または `my_turn=false`) なら
-   * IdleBody を表示し続ける。要素は `ActionType` のいずれか。
+   * IdleBody を表示し続ける。`null` / `undefined` は my_turn と同様、旧
+   * スキーマのフェイルセーフ状態。要素は `ActionType` のいずれか。
    */
-  available_actions?: ActionType[];
+  available_actions?: ActionType[] | null;
 }
 
 // ============================================================

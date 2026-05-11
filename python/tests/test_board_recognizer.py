@@ -770,3 +770,59 @@ def test_board_recognizer_my_turn_actions_are_subset_of_known_keys(
     bgr = np.zeros((100, 100, 3), dtype=np.uint8)
     tenhou, _ = rec.recognize(bgr, {})
     assert all(a in valid for a in tenhou["available_actions"])
+
+
+# CodeRabbit major on PR #47: 判定優先度の境界回帰テスト。
+# 「hand_count を 14 と誤検出 + call ボタン同時表示」と「hand_count<14 で
+# riichi/tsumo ボタンが出ているケース」が、ボタン優先で正しく扱われることを固定する。
+
+
+def test_derive_turn_state_call_buttons_precede_false_14_tile_signal(tmp_path: Path) -> None:
+    """ツモアニメーション等で hand_count を 14 と誤検出しても、call ボタン
+    (pon/pass) が出ていればそちらを優先する (= 鳴き候補を取りこぼさない)。"""
+    rec = BoardRecognizer(tmp_path)
+    my_turn, actions = rec._derive_turn_state(
+        hand_count=14, buttons=["pon", "pass"], timer_active=False
+    )
+    assert my_turn is True
+    assert actions == ["pon", "pass"]
+
+
+def test_derive_turn_state_riichi_button_marks_my_turn_even_if_hand_count_is_13(
+    tmp_path: Path,
+) -> None:
+    """hand_count=13 のフレームで riichi ボタンが出ているケース (= 14 牌目を
+    認識し損ねた) でも、ボタン検出の即時反映ルールに従って my_turn=True を
+    返す (= リーチ宣言タイミングを取りこぼさない)。"""
+    rec = BoardRecognizer(tmp_path)
+    my_turn, actions = rec._derive_turn_state(hand_count=13, buttons=["riichi"], timer_active=False)
+    assert my_turn is True
+    assert actions == ["riichi"]
+
+
+def test_derive_turn_state_tsumo_button_alone_marks_my_turn(tmp_path: Path) -> None:
+    """tsumo ボタンが単独で出ているケース (= 和了可能タイミング) も即時 True。"""
+    rec = BoardRecognizer(tmp_path)
+    my_turn, actions = rec._derive_turn_state(hand_count=13, buttons=["tsumo"], timer_active=False)
+    assert my_turn is True
+    assert actions == ["tsumo"]
+
+
+def test_derive_turn_state_kan_with_hand14_merges_to_discard_path(tmp_path: Path) -> None:
+    """kan ボタン + hand_count=14 は「自分のツモ番 + 暗槓/加槓可能」なので
+    `["discard", "kan"]` にマージ。call_only ボタン (chi/pon/ron/pass) が
+    含まれない限り call 経路には行かない。"""
+    rec = BoardRecognizer(tmp_path)
+    my_turn, actions = rec._derive_turn_state(hand_count=14, buttons=["kan"], timer_active=False)
+    assert my_turn is True
+    assert actions == ["discard", "kan"]
+
+
+def test_derive_turn_state_kan_with_hand13_treated_as_call_path(tmp_path: Path) -> None:
+    """大明槓 (他家打牌に対する kan) は hand_count<14 で出る。call 経路扱い。"""
+    rec = BoardRecognizer(tmp_path)
+    my_turn, actions = rec._derive_turn_state(
+        hand_count=13, buttons=["kan", "pass"], timer_active=False
+    )
+    assert my_turn is True
+    assert actions == ["kan", "pass"]

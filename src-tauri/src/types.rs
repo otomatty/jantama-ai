@@ -236,13 +236,16 @@ pub struct GameBoardSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub round_label: Option<String>,
     /// 「今自分が選択肢を持っているか」(打牌 or 鳴き or 和了 など)。
-    /// `false` のとき Rust 監視ループは mortal 推論をスキップする。
+    /// `Some(false)` のとき Rust 監視ループは mortal 推論をスキップする。
+    /// `None` (recognition 側がフィールド未対応 = 旧スキーマ) のときはフェイル
+    /// セーフで「mortal を呼ぶ側」に倒す (Codex P1 / CodeRabbit major on PR #47)。
     #[serde(default)]
-    pub my_turn: bool,
+    pub my_turn: Option<bool>,
     /// 取り得るアクション (`discard` / `riichi` / `chi` / `pon` / `kan` /
-    /// `ron` / `tsumo` / `pass`)。空配列なら recommend 表示を行わない。
+    /// `ron` / `tsumo` / `pass`)。`Some(空配列)` なら recommend 表示を行わない。
+    /// `None` は旧スキーマ互換 (= フィールド欠落)。
     #[serde(default)]
-    pub available_actions: Vec<String>,
+    pub available_actions: Option<Vec<String>>,
 }
 
 #[cfg(test)]

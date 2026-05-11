@@ -797,24 +797,22 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
         .get("round_label")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    // issue #15: my_turn / available_actions は寛容に抽出する。recognition が
-    // 旧スキーマで返した (= フィールドが存在しない) 場合は false / 空配列に
-    // 倒すことで、Phase C 前の tenhou_json も壊さずに通過させる。ただし「フィールド
-    // 欠落」状態では Rust 側で「skip しない」(= 従来通り mortal を呼ぶ) 方向に
-    // フェイルセーフする (`should_skip_inference` 参照)。
-    let my_turn = obj
-        .get("my_turn")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let available_actions: Vec<String> = obj
+    // issue #15: my_turn / available_actions の「フィールド有無」と「値」を
+    // 区別して保持する。Codex P1 / CodeRabbit major on PR #47:
+    // - 旧 recognition (フィールド未対応) はフィールドが無い → `None` で保持
+    // - 新 recognition + 手番でない → `Some(false)` / `Some(vec![])`
+    // - 新 recognition + 手番 → `Some(true)` / `Some(actions)`
+    // `should_skip_inference` は `None` を「不明」として扱い、mortal を呼ぶ側に
+    // フェイルセーフする (= 部分的に古いプロセスが残る環境でも推奨を出し続ける)。
+    let my_turn = obj.get("my_turn").and_then(|v| v.as_bool());
+    let available_actions: Option<Vec<String>> = obj
         .get("available_actions")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     Some(GameBoardSummary {
         hand,
         self_wind,
@@ -831,14 +829,26 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
 /// `my_turn=false` または `available_actions` が空のとき、mortal 推論を
 /// スキップして monitor ループが軽くなるようにする (issue #15)。
 ///
-/// `board` が None のとき (= recognition のスキーマ崩れ / 必須フィールド欠落)
-/// は「念のため mortal を呼ぶ」側に倒す。これがないと、recognition だけが
-/// 一時的に壊れた状態で UI が完全に IdleBody に張り付き、デバッグしにくくなる。
+/// フェイルセーフ方針 (Codex P1 / CodeRabbit major on PR #47):
+/// - `board` が None (= recognition スキーマ崩れ) → 呼ぶ (`false`)
+/// - `my_turn` フィールド欠落 (= 旧 recognition) → 呼ぶ
+/// - `available_actions` フィールド欠落 (= 旧 recognition) → 呼ぶ
+/// - 明示的に `my_turn=false` → スキップ (`true`)
+/// - 明示的に `available_actions=[]` → スキップ
+///
+/// これにより「Rust 側が新スキーマに切り替わったが recognition プロセスは
+/// 古いまま」というロールアウト過渡期でも、無音 IdleBody に張り付かない。
 fn should_skip_inference(board: Option<&GameBoardSummary>) -> bool {
-    match board {
-        None => false,
-        Some(b) => !b.my_turn || b.available_actions.is_empty(),
+    let Some(b) = board else { return false };
+    // 明示 false のときだけスキップ。None (フィールド無し) は呼ぶ側に倒す。
+    if b.my_turn == Some(false) {
+        return true;
     }
+    // 明示空配列のときだけスキップ。None は呼ぶ側に倒す。
+    if matches!(b.available_actions.as_deref(), Some(actions) if actions.is_empty()) {
+        return true;
+    }
+    false
 }
 
 /// `request_line_with_filter` のクロージャから呼ぶための受信応答 id 判定。
@@ -1227,7 +1237,7 @@ mod tests {
     }
 
     /// issue #15: `build_board_summary` は `my_turn` / `available_actions` を
-    /// tenhou_json から抽出し、欠落時は安全な既定値 (false / 空配列) で埋める。
+    /// tenhou_json から抽出し、欠落時は `None` (= フィールド有無未確定) で残す。
     #[test]
     fn build_board_summary_extracts_my_turn_and_actions() {
         let tenhou = serde_json::json!({
@@ -1241,12 +1251,16 @@ mod tests {
             "available_actions": ["discard", "riichi"],
         });
         let board = build_board_summary(&tenhou).expect("summary");
-        assert!(board.my_turn);
-        assert_eq!(board.available_actions, vec!["discard", "riichi"]);
+        assert_eq!(board.my_turn, Some(true));
+        assert_eq!(
+            board.available_actions.as_deref(),
+            Some(&["discard".to_string(), "riichi".to_string()][..])
+        );
     }
 
     /// issue #15: 旧 tenhou_json (my_turn / available_actions 無し) は
-    /// `(false, vec![])` で埋まる (互換性レグレッション)。
+    /// `None` のまま保持される (互換性レグレッション)。フェイルセーフで mortal が
+    /// 呼ばれることは `should_skip_inference_fail_safe_on_missing_fields` でカバー。
     #[test]
     fn build_board_summary_defaults_when_my_turn_missing() {
         let tenhou = serde_json::json!({
@@ -1258,15 +1272,16 @@ mod tests {
             "scores": [25000, 25000, 25000, 25000],
         });
         let board = build_board_summary(&tenhou).expect("summary");
-        assert!(!board.my_turn);
-        assert!(board.available_actions.is_empty());
+        assert_eq!(board.my_turn, None);
+        assert_eq!(board.available_actions, None);
     }
 
     /// issue #15: `should_skip_inference` の判定マトリクス。
     /// - board None → false (フェイルセーフで mortal を呼ぶ側)
-    /// - my_turn=false → true
-    /// - my_turn=true + actions empty → true
-    /// - my_turn=true + actions 非空 → false
+    /// - my_turn=Some(false) → true
+    /// - my_turn=Some(true) + actions Some(empty) → true
+    /// - my_turn=Some(true) + actions 非空 → false
+    /// - my_turn=None (旧 schema) → false (フェイルセーフ)
     #[test]
     fn should_skip_inference_decision_matrix() {
         assert!(!should_skip_inference(None));
@@ -1279,23 +1294,59 @@ mod tests {
             dora_indicators: vec![],
             score: None,
             round_label: None,
-            my_turn: false,
-            available_actions: vec!["discard".into()],
+            my_turn: Some(false),
+            available_actions: Some(vec!["discard".into()]),
         };
         assert!(should_skip_inference(Some(&opponent_turn)));
 
         let my_turn_no_actions = GameBoardSummary {
-            my_turn: true,
-            available_actions: vec![],
+            my_turn: Some(true),
+            available_actions: Some(vec![]),
             ..opponent_turn.clone()
         };
         assert!(should_skip_inference(Some(&my_turn_no_actions)));
 
         let my_turn_with_action = GameBoardSummary {
-            my_turn: true,
-            available_actions: vec!["discard".into()],
+            my_turn: Some(true),
+            available_actions: Some(vec!["discard".into()]),
             ..opponent_turn
         };
         assert!(!should_skip_inference(Some(&my_turn_with_action)));
+    }
+
+    /// issue #15 (Codex P1 / CodeRabbit major on PR #47):
+    /// recognition 側が新スキーマに未対応で `my_turn` / `available_actions` を
+    /// 出していないフレームでは、`should_skip_inference` は `false` を返して
+    /// mortal を呼ぶ側にフェイルセーフする。これがないと「Rust だけ先に
+    /// 切り替わって recognition は古い」過渡状態で UI が永続的に IdleBody に
+    /// 張り付いて推奨が出なくなる。
+    #[test]
+    fn should_skip_inference_fail_safe_on_missing_fields() {
+        let base = GameBoardSummary {
+            hand: vec![],
+            self_wind: "東".into(),
+            round_wind: "東".into(),
+            turn: 1,
+            dora_indicators: vec![],
+            score: None,
+            round_label: None,
+            my_turn: None,
+            available_actions: None,
+        };
+        assert!(!should_skip_inference(Some(&base)));
+
+        // `my_turn` だけ欠落 (途中バージョンの recognition):
+        let actions_only = GameBoardSummary {
+            available_actions: Some(vec!["discard".into()]),
+            ..base.clone()
+        };
+        assert!(!should_skip_inference(Some(&actions_only)));
+
+        // `available_actions` だけ欠落:
+        let my_turn_only = GameBoardSummary {
+            my_turn: Some(true),
+            ..base
+        };
+        assert!(!should_skip_inference(Some(&my_turn_only)));
     }
 }

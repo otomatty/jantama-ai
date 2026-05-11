@@ -8,9 +8,16 @@ import type { AppError, GameBoardSummary, InferenceResult } from "@/types";
 
 // `useInferenceEvents` 内部の `@tauri-apps/api/event#listen` を差し替えて、
 // 任意のタイミングで Rust 側からの emit を再現できるようにする。
+// issue #15: payload には `inference: InferenceResult | null` と heartbeat 用の
+// `timestamp: string` が含まれる。
 type Handler<T> = (event: { payload: T }) => void;
+type InferencePayload = {
+  inference: InferenceResult | null;
+  board: GameBoardSummary | null;
+  timestamp: string;
+};
 const handlers = {
-  inference: null as Handler<{ inference: InferenceResult; board: GameBoardSummary | null }> | null,
+  inference: null as Handler<InferencePayload> | null,
   error: null as Handler<AppError> | null,
 };
 

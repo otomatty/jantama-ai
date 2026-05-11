@@ -51,10 +51,16 @@ DEFAULT_TENHOU_JSON: dict[str, Any] = {
 # 自分のツモ番) では rinshan/kakan/riichi/tsumo を併せて出せる可能性があるが、
 # `chi/pon/ron/pass` は他家からの打牌に対するレスポンスなので 13 枚側で出る。
 # `_derive_turn_state` で組み合わせをフィルタするための定数。
-_DISCARD_TURN_EXTRA_ACTIONS: frozenset[str] = frozenset({"riichi", "tsumo", "kan"})
-_CALL_TURN_ACTIONS: frozenset[str] = frozenset({"chi", "pon", "kan", "ron", "pass"})
-# `_derive_turn_state` の出力順序を安定させるための順序付き並び。
+# 「自分のツモ番に上乗せ可能なアクション」(打牌に加えてリーチ宣言 / 自摸和 /
+# 暗槓・加槓を選べる)。`_derive_turn_state` の出力順序もこの並びに合わせる。
+_DISCARD_TURN_EXTRA_ACTIONS_ORDERED: tuple[str, ...] = ("riichi", "tsumo", "kan")
+# 「他家打牌へのレスポンス」として hand_count<14 のフレームで現れるボタン群。
+# kan は大明槓があり得るのでここに含める (= call 系として扱う)。出力順序も同じ。
 _CALL_TURN_ACTIONS_ORDERED: tuple[str, ...] = ("chi", "pon", "kan", "ron", "pass")
+_CALL_ONLY_BUTTONS: frozenset[str] = frozenset({"chi", "pon", "ron", "pass"})
+# 「自分のツモ番でのみ出るボタン」(14 牌フォールバックが取りこぼした場合の
+# エッジケース対策)。kan は call 経路と重複させるため含めない。
+_DISCARD_ONLY_BUTTONS: frozenset[str] = frozenset({"riichi", "tsumo"})
 
 # `hand_count >= 14` または「タイマー active のみ」を根拠に `my_turn=True` に
 # 切り替える前に必要な連続フレーム数 (= 2 で「2 フレーム連続で真なら flip」)。
@@ -216,18 +222,31 @@ class BoardRecognizer:
         """検出シグナルから (my_turn, available_actions) を算出する。
 
         判定優先度:
-        1. ボタン検出 (即時反映): 鳴き選択中・和了可能・リーチ宣言中など。
-           hand_count とは独立に扱える。
+        1. call 系ボタン (chi/pon/ron/pass 等、他家打牌レスポンス) は hand_count
+           より優先。hand 認識が一時的に 14 牌を誤検出していてもボタンを
+           取りこぼさない (CodeRabbit major on PR #47)。
         2. hand_count >= 14 (debounce 適用): 自分のツモ番。打牌可能 +
            ボタンで上乗せ可能なアクション (`riichi/tsumo/kan`) をマージする。
-        3. timer_active のみ (debounce 適用): 上記いずれも検知できないが
+        3. discard 系ボタンのみ (riichi/tsumo): 14 牌目を取りこぼしている
+           エッジケース (ROI ずれ等)。即時 my_turn=True に倒す。
+        4. timer_active のみ (debounce 適用): 上記いずれも検知できないが
            タイマーが出ているという保守的なフォールバック。`["discard"]` に倒す。
-        4. 何も無し → `(False, [])`。
+        5. 何も無し → `(False, [])`。
+
+        ボタン検出経路はいずれも debounce を経ない (= 即時反映)。
+        hand_count / timer のみが根拠の場合だけ `_my_turn_streak` をカウントする。
         """
-        # 1. ボタン検出が先
         button_set = set(buttons)
-        has_call_button = bool(button_set & _CALL_TURN_ACTIONS)
-        has_discard_extra = bool(button_set & _DISCARD_TURN_EXTRA_ACTIONS)
+        # call 系・discard 系の判定は kan も含めた全体集合で行う。
+        has_call_button = bool(button_set & _CALL_ONLY_BUTTONS)
+
+        # 1. call 系ボタンは hand_count より優先 (即時反映)
+        if has_call_button:
+            self._my_turn_streak = 0
+            # 出力順序は ACTION_KEYS 順 (chi → pon → kan → ron → pass)。
+            # kan が混在していたら call 系として一緒に出す (大明槓ケース)。
+            actions = [k for k in _CALL_TURN_ACTIONS_ORDERED if k in button_set]
+            return True, actions
 
         # 2. ツモ番 (14 牌): hand_count をベースに ["discard"] + 上乗せ可能ボタン
         if hand_count >= 14:
@@ -236,24 +255,17 @@ class BoardRecognizer:
                 # 1 フレーム目はまだ flip しない。ただしボタンが出ている場合は
                 # ボタン経由で即時反映する (debounce 不要)。
                 return False, []
-            # 順序を安定させるため ACTION_KEYS の並びに合わせる。
-            extras = [k for k in ("riichi", "tsumo", "kan") if k in button_set]
+            # 順序を安定させるため定数の並びに合わせる。
+            extras = [k for k in _DISCARD_TURN_EXTRA_ACTIONS_ORDERED if k in button_set]
             return True, ["discard", *extras]
 
-        # 3. ボタンだけが出ている (鳴き選択中など)
-        if has_call_button:
+        # 3. riichi/tsumo ボタンのみ (hand_count を 14 牌として検出し損ねたケース)。
+        # 仕様上「ボタン検出は即時反映」なので my_turn=True に倒し、ボタン情報を
+        # そのまま返す。`tsumo` 単独であっても和了可能タイミングなので推奨を出す。
+        if button_set & _DISCARD_ONLY_BUTTONS:
             self._my_turn_streak = 0
-            # call 系のみを残してそのまま返す。ACTION_KEYS の並びを尊重して
-            # 安定した順序にする (テストの容易性のため)。
-            actions = [k for k in _CALL_TURN_ACTIONS_ORDERED if k in button_set]
+            actions = [k for k in _DISCARD_TURN_EXTRA_ACTIONS_ORDERED if k in button_set]
             return True, actions
-
-        # 鳴きじゃないが riichi/tsumo/kan ボタンだけが出ているケースは普通ないが、
-        # ROI 切り位置のズレなどで起きたら可能性は薄いので捨てる代わりに
-        # 「打牌可能」フォールバックに合流させる (= 14 牌側へは寄せず、保守的に処理)。
-        if has_discard_extra:
-            self._my_turn_streak = 0
-            return False, []
 
         # 4. タイマーだけが根拠 (debounce 適用)
         if timer_active:
@@ -262,6 +274,6 @@ class BoardRecognizer:
                 return False, []
             return True, ["discard"]
 
-        # 全シグナル空 → 手番でない
+        # 5. 全シグナル空 → 手番でない
         self._my_turn_streak = 0
         return False, []
