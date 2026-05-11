@@ -501,15 +501,19 @@ class MeldsRecognizer:
         if n == 3:
             if h_count != 1:
                 return None
+            # チー判定を最優先で評価する: 3 牌が同一スーツの連続なら、横向きの
+            # 位置に関わらずチー。チーは麻雀ルールで「上家からしか鳴けない」
+            # ため `from_` は常に 3 (kamicha)。横向きの位置は「どの牌を鳴いたか」
+            # (副露牌は昇順表示なので index 0=小, 1=中, 2=大の called tile) を
+            # 示すだけで、誰から鳴いたかには影響しない (chatgpt-codex P1 on PR #46)。
+            if self._is_chi_sequence(tiles):
+                return Meld(player=player_idx, type="chi", tiles=tiles, from_=3)
             from_ = self._horizontal_position_to_from(h_indices[0], n)
             if kakan_stack and all_same:
                 # 加槓: 4 枚目はポンと同種なので、横向き牌の code を複製して 4 枚にする。
                 tiles_with_stack = list(tiles)
                 tiles_with_stack.append(slots[h_indices[0]].code)
                 return Meld(player=player_idx, type="kakan", tiles=tiles_with_stack, from_=from_)
-            # チー判定は「横向きが左端 (= 上家由来) かつ 3 牌が同一スーツの連続数」のとき。
-            if from_ == 3 and self._is_chi_sequence(tiles):
-                return Meld(player=player_idx, type="chi", tiles=tiles, from_=3)
             if all_same:
                 return Meld(player=player_idx, type="pon", tiles=tiles, from_=from_)
             return None

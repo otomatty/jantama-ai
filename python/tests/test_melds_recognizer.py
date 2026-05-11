@@ -237,6 +237,48 @@ def test_recognize_chi_from_kamicha(tmp_path: Path) -> None:
     assert m["player"] == 0
 
 
+def test_recognize_chi_with_middle_horizontal(tmp_path: Path) -> None:
+    """連続スーツ 3 牌 + 中央横向き (= 中央の牌を鳴いた) → チー、from=3。
+
+    雀魂は副露牌を昇順表示するため、4m+5m+6m の連続で 5m を鳴いた場合、
+    中央が横向きになる。チーは上家からしか鳴けないので、横向きの位置に
+    関わらず from=3 になるのが正しい (chatgpt-codex P1 on PR #46)。
+    """
+
+    def layout(c: np.ndarray) -> None:
+        x = 4
+        x += _draw_upright(c, x, "4m")
+        x += _draw_horizontal(c, x, "5m")  # 鳴いた牌 (中央)
+        x += _draw_upright(c, x, "6m")
+
+    result = _build_and_recognize(tmp_path, layout)
+    assert len(result) == 1
+    m = result[0]
+    assert m["type"] == "chi"
+    assert m["from"] == 3
+    assert m["tiles"] == ["4m", "5m", "6m"]
+
+
+def test_recognize_chi_with_right_horizontal(tmp_path: Path) -> None:
+    """連続スーツ 3 牌 + 右横向き (= 最大の牌を鳴いた) → チー、from=3。
+
+    7p+8p+9p で 9p を鳴いた場合は右端が横向きになる。
+    """
+
+    def layout(c: np.ndarray) -> None:
+        x = 4
+        x += _draw_upright(c, x, "7p")
+        x += _draw_upright(c, x, "8p")
+        x += _draw_horizontal(c, x, "9p")  # 鳴いた牌 (右)
+
+    result = _build_and_recognize(tmp_path, layout)
+    assert len(result) == 1
+    m = result[0]
+    assert m["type"] == "chi"
+    assert m["from"] == 3
+    assert m["tiles"] == ["7p", "8p", "9p"]
+
+
 def test_recognize_pon_from_kamicha(tmp_path: Path) -> None:
     """同一 3 牌 + 左横向き → ポン、from=3 (上家)。"""
 
