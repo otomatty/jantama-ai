@@ -284,6 +284,9 @@ def test_recognize_all_four_players_have_correct_player_index(tmp_path: Path) ->
     bgr = cv2.cvtColor(full, cv2.COLOR_GRAY2BGR)
 
     result = rec.recognize_rivers(bgr, rivers)
+    # 4 家 × 1 牌の入力なので、phantom 検出 (背景ノイズや誤分割) が混じって
+    # も件数で気付けるよう件数アサートを先に置く (CodeRabbit Minor)。
+    assert len(result) == 4
     by_player = {r["player"]: r for r in result}
     assert by_player[0]["tile"] == "1m"
     assert by_player[1]["tile"] == "2p"
