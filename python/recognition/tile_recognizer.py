@@ -126,6 +126,54 @@ class RoiRect:
             return None
 
 
+def crop_roi_to_gray(
+    bgr_frame: np.ndarray | None,
+    roi: RoiRect,
+    min_w: int = 1,
+    min_h: int = 1,
+) -> np.ndarray | None:
+    """正規化 ROI を画素座標にクランプし BGR→Gray 変換した crop を返す (issue #16)。
+
+    `tile` / `river` / `wind` recognizer で重複していた前処理 (画面サイズ
+    乗算、`max/min` クランプ、`cv2.cvtColor`) を 1 箇所に集約したヘルパー。
+    幅 / 高さが `min_w` / `min_h` を下回るような潰れた ROI は `None` を返す。
+
+    返り値は 2 次元 `np.ndarray (uint8)` または `None`。
+
+    補足: 「ノルム化」は `cv2.matchTemplate(..., TM_CCOEFF_NORMED)` 自体が
+    NCC スコア計算でテンプレ / 入力それぞれを平均減算 + 分散正規化するため、
+    ここで追加の `cv2.normalize` をかける必要はない。グレースケール化のみ
+    で十分な前処理が成立している (Issue #16 設計判断)。
+    """
+    if bgr_frame is None or bgr_frame.size == 0:
+        return None
+    h, w = bgr_frame.shape[:2]
+    x0 = max(0, min(w, int(roi.x * w)))
+    y0 = max(0, min(h, int(roi.y * h)))
+    x1 = max(0, min(w, int((roi.x + roi.w) * w)))
+    y1 = max(0, min(h, int((roi.y + roi.h) * h)))
+    if x1 - x0 < min_w or y1 - y0 < min_h:
+        return None
+    crop = bgr_frame[y0:y1, x0:x1]
+    if crop.ndim == 2:
+        return crop
+    return cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+
+def fit_to_template_size(
+    seg_gray: np.ndarray,
+    tmpl_size: tuple[int, int],
+) -> np.ndarray:
+    """`cv2.matchTemplate` 入力を `tmpl_size = (h, w)` に揃える (issue #16)。
+
+    既にテンプレと同サイズなら no-op で元配列を返す。
+    """
+    th, tw = tmpl_size
+    if seg_gray.shape[:2] == (th, tw):
+        return seg_gray
+    return cv2.resize(seg_gray, (tw, th))
+
+
 class TileRecognizer:
     """37 テンプレを 1 度だけロードして使い回す手牌認識器。"""
 
@@ -205,19 +253,10 @@ class TileRecognizer:
                 )
                 self._warned_no_roi_labels.add(roi_label)
             return [], 0.0
-        if bgr_frame is None or bgr_frame.size == 0:
-            return [], 0.0
 
-        h, w = bgr_frame.shape[:2]
-        x0 = max(0, min(w, int(roi.x * w)))
-        y0 = max(0, min(h, int(roi.y * h)))
-        x1 = max(0, min(w, int((roi.x + roi.w) * w)))
-        y1 = max(0, min(h, int((roi.y + roi.h) * h)))
-        if x1 - x0 < slots or y1 - y0 <= 0:
+        gray = crop_roi_to_gray(bgr_frame, roi, min_w=slots, min_h=1)
+        if gray is None:
             return [], 0.0
-
-        crop = bgr_frame[y0:y1, x0:x1]
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         crop_h, crop_w = gray.shape[:2]
         seg_w_base = crop_w // slots
 
@@ -243,9 +282,7 @@ class TileRecognizer:
 
     def _match_segment(self, seg_gray: np.ndarray) -> tuple[str | None, float]:
         assert self._tmpl_size is not None
-        th, tw = self._tmpl_size
-        if seg_gray.shape != (th, tw):
-            seg_gray = cv2.resize(seg_gray, (tw, th))
+        seg_gray = fit_to_template_size(seg_gray, self._tmpl_size)
 
         best_code: str | None = None
         best_score = -1.0
