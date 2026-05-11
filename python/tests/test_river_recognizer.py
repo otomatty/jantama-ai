@@ -59,6 +59,23 @@ def _make_player_canvas(codes_grid: list[list[str | None]]) -> np.ndarray:
     return np.concatenate(rows, axis=0)
 
 
+def _to_screen_orientation(upright_panel: np.ndarray, player_idx: int) -> np.ndarray:
+    """upright で組み立てたパネルを「画面上で見える向き」へ pre-rotate する。
+
+    river_recognizer は他家の crop を player_idx 別に逆回転して upright へ
+    正規化するため、テスト入力は逆方向 (upright → 画面向き) を仕込む。
+    """
+    if player_idx == 0:
+        return upright_panel
+    if player_idx == 1:  # 下家: 画面で 90° CW
+        return cv2.rotate(upright_panel, cv2.ROTATE_90_CLOCKWISE)
+    if player_idx == 2:  # 対面: 画面で 180°
+        return cv2.rotate(upright_panel, cv2.ROTATE_180)
+    if player_idx == 3:  # 上家: 画面で 90° CCW
+        return cv2.rotate(upright_panel, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    raise ValueError(player_idx)
+
+
 def test_river_tile_to_dict_default_no_riichi() -> None:
     t = RiverTile(player=2, tile="3p")
     assert t.to_dict() == {"player": 2, "tile": "3p", "tedashi": True}
@@ -138,7 +155,11 @@ def test_recognize_self_player_full_river(tmp_path: Path) -> None:
 
 
 def test_recognize_skips_blank_cells(tmp_path: Path) -> None:
-    """途中で鳴かれて空になったセルはスキップされ、残りの牌だけ返る。"""
+    """途中で鳴かれて空になったセルはスキップされ、残りの牌だけ返る。
+
+    下家 (player 1) の河は画面上で 90° CW 回転するため、入力パネルも
+    その向きに pre-rotate して与える。
+    """
     _write_all_templates(tmp_path)
     rec = RiverRecognizer(tmp_path)
 
@@ -150,8 +171,9 @@ def test_recognize_skips_blank_cells(tmp_path: Path) -> None:
         [None] * RIVER_COLS,
         [None] * RIVER_COLS,
     ]
-    canvas_gray = _make_player_canvas(grid)
-    bgr = cv2.cvtColor(canvas_gray, cv2.COLOR_GRAY2BGR)
+    upright = _make_player_canvas(grid)
+    screen = _to_screen_orientation(upright, player_idx=1)
+    bgr = cv2.cvtColor(screen, cv2.COLOR_GRAY2BGR)
 
     rivers = {"right": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}}
     result = rec.recognize_rivers(bgr, rivers)
@@ -160,14 +182,23 @@ def test_recognize_skips_blank_cells(tmp_path: Path) -> None:
     assert all(r["player"] == 1 for r in result)
 
 
-def test_recognize_detects_riichi_horizontal_tile(tmp_path: Path) -> None:
-    """90 度 CCW 回転したテンプレを 1 枚混ぜると riichi=True で識別される。"""
+@pytest.mark.parametrize(
+    "rotation",
+    [cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE],
+    ids=["ccw", "cw"],
+)
+def test_recognize_detects_riichi_horizontal_tile(tmp_path: Path, rotation: int) -> None:
+    """90 度回転したテンプレを 1 枚混ぜると riichi=True で識別される。
+
+    回転方向 (CCW / CW) どちらでも検出できることを両パラメータで検証する
+    (NCC は回転不変ではないため、両方向の事前テンプレが効くか確認)。
+    """
     _write_all_templates(tmp_path)
     rec = RiverRecognizer(tmp_path)
 
     riichi_code = "5m"
     riichi_gray_upright = _make_tile_template(TILE_CODES.index(riichi_code))
-    riichi_gray_horizontal = cv2.rotate(riichi_gray_upright, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    riichi_gray_horizontal = cv2.rotate(riichi_gray_upright, rotation)
     # 横向き牌は素のままだと (W, H) = (TMPL_W, TMPL_H) 違いになるためセルへ
     # フィットさせる: ここでは upright と同サイズへ resize して並べる。
     # river_recognizer 側は cell 形状を tmpl 形状へ resize するため、
@@ -199,13 +230,16 @@ def test_recognize_detects_riichi_horizontal_tile(tmp_path: Path) -> None:
 
 
 def test_recognize_all_four_players_have_correct_player_index(tmp_path: Path) -> None:
-    """4 家分の ROI を別々に切って与えると、それぞれ player 0..3 で返る。"""
+    """4 家分の ROI を別々に切って与えると、それぞれ player 0..3 で返る。
+
+    他家のパネルは画面上の向き (右家=90° CW, 対面=180°, 左家=90° CCW) へ
+    pre-rotate して仕込む。河 recognizer が player_idx で逆回転して upright
+    に正規化することを検証する。
+    """
     _write_all_templates(tmp_path)
     rec = RiverRecognizer(tmp_path)
 
-    # 1 牌だけを置いた小さい河キャンバスを 2x2 グリッドに並べる:
-    # 上段左=self, 上段右=right, 下段左=across, 下段右=left
-    def _one_tile_canvas(code: str) -> np.ndarray:
+    def _one_tile_upright(code: str) -> np.ndarray:
         grid: list[list[str | None]] = [
             [code, None, None, None, None, None],
             [None] * RIVER_COLS,
@@ -214,26 +248,41 @@ def test_recognize_all_four_players_have_correct_player_index(tmp_path: Path) ->
         ]
         return _make_player_canvas(grid)
 
-    panels = {
-        "self": _one_tile_canvas("1m"),
-        "right": _one_tile_canvas("2p"),
-        "across": _one_tile_canvas("3s"),
-        "left": _one_tile_canvas("1z"),
+    upright_codes = {"self": "1m", "right": "2p", "across": "3s", "left": "1z"}
+    panels_screen = {
+        key: _to_screen_orientation(_one_tile_upright(code), player_idx)
+        for player_idx, (key, code) in enumerate(upright_codes.items())
     }
-    ph, pw = next(iter(panels.values())).shape
-    full = np.full((ph * 2, pw * 2), 128, dtype=np.uint8)
-    full[0:ph, 0:pw] = panels["self"]
-    full[0:ph, pw : 2 * pw] = panels["right"]
-    full[ph : 2 * ph, 0:pw] = panels["across"]
-    full[ph : 2 * ph, pw : 2 * pw] = panels["left"]
+
+    # CW/CCW 後は (h, w) が入れ替わるため、どの向きでも収まる正方形セルへ
+    # 各家を左上寄せで配置し、ROI は実パネル寸に合わせて切り出す。
+    uh, uw = (
+        next(iter(panels_screen.values())).shape[0],
+        next(iter(panels_screen.values())).shape[1],
+    )
+    cell_size = max(uh, uw, RIVER_ROWS * TMPL_H, RIVER_COLS * TMPL_W)
+    full_h = cell_size * 2
+    full_w = cell_size * 2
+    full = np.full((full_h, full_w), 128, dtype=np.uint8)
+    offsets = {
+        "self": (0, 0),
+        "right": (0, cell_size),
+        "across": (cell_size, 0),
+        "left": (cell_size, cell_size),
+    }
+    rivers: dict[str, dict[str, float]] = {}
+    for key, (oy, ox) in offsets.items():
+        panel = panels_screen[key]
+        ph, pw = panel.shape
+        full[oy : oy + ph, ox : ox + pw] = panel
+        rivers[key] = {
+            "x": ox / full_w,
+            "y": oy / full_h,
+            "w": pw / full_w,
+            "h": ph / full_h,
+        }
     bgr = cv2.cvtColor(full, cv2.COLOR_GRAY2BGR)
 
-    rivers = {
-        "self": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5},
-        "right": {"x": 0.5, "y": 0.0, "w": 0.5, "h": 0.5},
-        "across": {"x": 0.0, "y": 0.5, "w": 0.5, "h": 0.5},
-        "left": {"x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5},
-    }
     result = rec.recognize_rivers(bgr, rivers)
     by_player = {r["player"]: r for r in result}
     assert by_player[0]["tile"] == "1m"

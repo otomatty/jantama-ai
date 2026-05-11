@@ -91,13 +91,16 @@ def _extract_river_rois(
 
 
 class RiverRecognizer:
-    """37 テンプレ + その 90 度回転版を 1 度だけロードして使い回す河認識器。"""
+    """37 テンプレ + その 90 度回転版 (CW/CCW) を 1 度だけロードして使い回す河認識器。"""
 
     def __init__(self, template_dir: Path) -> None:
         self.template_dir = template_dir
         self._templates_upright: dict[str, np.ndarray] = {}
-        self._templates_rotated: dict[str, np.ndarray] = {}
-        # (h, w) for upright, (w, h) for rotated.
+        # NCC (TM_CCOEFF_NORMED) は回転不変ではないため、リーチ牌が CW 倒し
+        # でも CCW 倒しでも識別できるよう両方向を事前計算する (CodeRabbit Major)。
+        self._templates_rotated_ccw: dict[str, np.ndarray] = {}
+        self._templates_rotated_cw: dict[str, np.ndarray] = {}
+        # (h, w) for upright, (w, h) for rotated (CW/CCW 共通サイズ).
         self._size_upright: tuple[int, int] | None = None
         self._size_rotated: tuple[int, int] | None = None
         self._loaded = False
@@ -109,15 +112,16 @@ class RiverRecognizer:
         if result is None:
             return
         templates, size = result
-        # リーチ宣言牌は雀魂 UI 上で 90 度回転して横向きに配置される。
-        # 回転方向は CCW でも CW でも matchTemplate のスコアは同等なので
-        # 一方向だけ事前計算する。NCC は反転不変ではないため両方は不要。
-        rotated = {
+        rotated_ccw = {
             code: cv2.rotate(tmpl, cv2.ROTATE_90_COUNTERCLOCKWISE)
             for code, tmpl in templates.items()
         }
+        rotated_cw = {
+            code: cv2.rotate(tmpl, cv2.ROTATE_90_CLOCKWISE) for code, tmpl in templates.items()
+        }
         self._templates_upright = templates
-        self._templates_rotated = rotated
+        self._templates_rotated_ccw = rotated_ccw
+        self._templates_rotated_cw = rotated_cw
         self._size_upright = size  # (h, w)
         self._size_rotated = (size[1], size[0])  # (w, h)
         self._loaded = True
@@ -173,6 +177,16 @@ class RiverRecognizer:
             return []
 
         crop = bgr[y0:y1, x0:x1]
+        # 雀魂 UI では他家の河が画面上で回転して描画される (右家=90° CW,
+        # 対面=180°, 左家=90° CCW)。crop をプレイヤーごとに逆回転で正規化
+        # して「縦向き = upright」に揃え、6 列 × 4 段の grid 分割と縦向き
+        # テンプレマッチを 4 家で共通に扱う (gemini-code-assist High)。
+        if player_idx == 1:  # 下家 (right): 画面 90° CW → CCW で戻す
+            crop = cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif player_idx == 2:  # 対面 (across): 画面 180° → 180° で戻す
+            crop = cv2.rotate(crop, cv2.ROTATE_180)
+        elif player_idx == 3:  # 上家 (left): 画面 90° CCW → CW で戻す
+            crop = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         ch, cw = gray.shape[:2]
 
@@ -192,20 +206,26 @@ class RiverRecognizer:
                     continue
 
                 up_code, up_score = self._match(cell, self._templates_upright, self._size_upright)
-                rot_code, rot_score = self._match(cell, self._templates_rotated, self._size_rotated)
+                ccw_code, ccw_score = self._match(
+                    cell, self._templates_rotated_ccw, self._size_rotated
+                )
+                cw_code, cw_score = self._match(
+                    cell, self._templates_rotated_cw, self._size_rotated
+                )
+                # 回転側は CW/CCW のうち高い方を採用 (リーチ牌の倒し方向不問)。
+                if ccw_score >= cw_score:
+                    rot_code, rot_score = ccw_code, ccw_score
+                else:
+                    rot_code, rot_score = cw_code, cw_score
 
-                if up_code is None and rot_code is None:
-                    continue
-
-                if rot_code is not None and rot_score >= up_score + RIICHI_SCORE_MARGIN:
+                # _loaded=True ガード後は _match は必ず非 None を返す (37 種から
+                # best_score を 1 つ選ぶため)。防御的 None チェックは不要
+                # (gemini-code-assist medium)。
+                assert up_code is not None and rot_code is not None
+                if rot_score >= up_score + RIICHI_SCORE_MARGIN:
                     tiles.append(RiverTile(player=player_idx, tile=rot_code, riichi=True))
-                elif up_code is not None:
+                else:
                     tiles.append(RiverTile(player=player_idx, tile=up_code))
-                elif rot_code is not None:
-                    # 縦向きテンプレが 1 つもマッチしなかった (理論上ありえない
-                    # が防御的に) ケース: 回転側を採用するが riichi 判定は
-                    # 比較対象が無いので付けない。
-                    tiles.append(RiverTile(player=player_idx, tile=rot_code))
         return tiles
 
     def _match(

@@ -88,24 +88,29 @@ def handle_frame(req: dict[str, Any]) -> dict[str, Any]:
 
     try:
         bgr = _decode_frame(req.get("image_b64"))
-        if bgr is not None:
-            roi_calib = req.get("roi_calibration") or {}
-            roi_calib = roi_calib if isinstance(roi_calib, dict) else {}
-            hand_roi = RoiRect.from_dict(roi_calib.get("hand"))
+    except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
+        logger.warning("frame decode failed for id=%s", frame_id, exc_info=True)
+        bgr = None
+
+    if bgr is not None:
+        roi_calib = req.get("roi_calibration")
+        roi_calib = roi_calib if isinstance(roi_calib, dict) else {}
+        hand_roi = RoiRect.from_dict(roi_calib.get("hand"))
+
+        # 手牌と河は独立した try に分け、片方が失敗してももう片方は試行する。
+        try:
             tiles, conf = _get_recognizer().recognize_hand(bgr, hand_roi)
             tenhou_json["hand"] = tiles
             confidence = conf
+        except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
+            logger.warning("hand recognition failed for id=%s", frame_id, exc_info=True)
 
-            # issue #13: 河（捨牌列）認識。手牌側でエラーが出ても河は別系統で
-            # 試行できるよう独立した try でラップする。
-            try:
-                tenhou_json["river"] = _get_river_recognizer().recognize_rivers(
-                    bgr, roi_calib.get("rivers")
-                )
-            except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
-                logger.warning("river recognition failed for id=%s", frame_id, exc_info=True)
-    except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
-        logger.warning("hand recognition failed for id=%s", frame_id, exc_info=True)
+        try:
+            tenhou_json["river"] = _get_river_recognizer().recognize_rivers(
+                bgr, roi_calib.get("rivers")
+            )
+        except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
+            logger.warning("river recognition failed for id=%s", frame_id, exc_info=True)
 
     return {
         "type": "result",
