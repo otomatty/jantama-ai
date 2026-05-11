@@ -14,8 +14,8 @@
 use crate::capture;
 use crate::python_proc::{PythonProcError, PythonProcess};
 use crate::types::{
-    ActionType, GameBoardSummary, InferenceBackend, InferenceResult, RecommendationCandidate,
-    RiverRois, RoiCalibration, RoiRect,
+    ActionType, GameBoardSummary, InferenceBackend, InferenceResult, MeldRois,
+    RecommendationCandidate, RiverRois, RoiCalibration, RoiRect,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -919,6 +919,12 @@ fn sanitize_roi_calibration(src: &RoiCalibration) -> RoiCalibration {
             right: sanitize_opt_rect(src.rivers.right),
             across: sanitize_opt_rect(src.rivers.across),
             left: sanitize_opt_rect(src.rivers.left),
+        },
+        melds: MeldRois {
+            self_seat: sanitize_opt_rect(src.melds.self_seat),
+            right: sanitize_opt_rect(src.melds.right),
+            across: sanitize_opt_rect(src.melds.across),
+            left: sanitize_opt_rect(src.melds.left),
         },
         round_info: sanitize_opt_rect(src.round_info),
         self_wind: sanitize_opt_rect(src.self_wind),

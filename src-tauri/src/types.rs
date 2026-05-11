@@ -67,11 +67,30 @@ pub struct RiverRois {
     pub left: Option<RoiRect>,
 }
 
-/// 認識用 ROI キャリブレーション (issue #10 / #12)。
+/// 副露 (鳴き) 4 領域 (自家・下家・対面・上家)。issue #14。
+///
+/// 構造は `RiverRois` と同じ (4 家分の `Option<RoiRect>` をネスト)。
+/// `self` は Rust の予約語のため `self_seat` で保持し、JSON 上は `self` キーで
+/// 永続化する。`#[serde(default)]` により旧 settings.json (本フィールド欠落)
+/// も全 None で読み戻せる (互換性)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MeldRois {
+    #[serde(default, rename = "self")]
+    pub self_seat: Option<RoiRect>,
+    #[serde(default)]
+    pub right: Option<RoiRect>,
+    #[serde(default)]
+    pub across: Option<RoiRect>,
+    #[serde(default)]
+    pub left: Option<RoiRect>,
+}
+
+/// 認識用 ROI キャリブレーション (issue #10 / #12 / #14)。
 ///
 /// issue #12 で `scores` (4 家分の点棒を 1 つの領域に並べた帯) と
-/// `turn_counter` (巡目カウンタの数字) を追加。いずれも `#[serde(default)]`
-/// なので旧 settings.json (これらフィールド欠落) でも `None` で読み戻せる。
+/// `turn_counter` (巡目カウンタの数字) を追加。issue #14 で `melds`
+/// (4 家分の副露領域) を追加。いずれも `#[serde(default)]` なので旧
+/// settings.json (これらフィールド欠落) でも `None` で読み戻せる。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoiCalibration {
     #[serde(default)]
@@ -80,6 +99,8 @@ pub struct RoiCalibration {
     pub doras: Option<RoiRect>,
     #[serde(default)]
     pub rivers: RiverRois,
+    #[serde(default)]
+    pub melds: MeldRois,
     #[serde(default)]
     pub round_info: Option<RoiRect>,
     #[serde(default)]
@@ -264,5 +285,42 @@ mod tests {
 
         let round_trip: RoiCalibration = serde_json::from_value(json).unwrap();
         assert_eq!(round_trip.rivers.self_seat.unwrap().x, 0.1);
+    }
+
+    /// issue #14: melds 領域も同様に JSON 上は `self` キーで永続化される。
+    /// melds フィールド欠落時の Default フォールバックも合わせて確認。
+    #[test]
+    fn meld_rois_serialize_with_self_key() {
+        let mut roi = RoiCalibration::default();
+        roi.melds.self_seat = Some(RoiRect {
+            x: 0.5,
+            y: 0.6,
+            w: 0.2,
+            h: 0.1,
+        });
+        let json = serde_json::to_value(&roi).unwrap();
+        let melds = json.get("melds").expect("melds field");
+        assert!(melds.get("self").is_some());
+        assert!(melds.get("self_seat").is_none());
+
+        let round_trip: RoiCalibration = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip.melds.self_seat.unwrap().x, 0.5);
+    }
+
+    /// issue #14: melds フィールド欠落の旧 settings.json も全 None で読み戻せる。
+    #[test]
+    fn roi_calibration_deserializes_without_melds() {
+        let legacy = serde_json::json!({
+            "hand": null,
+            "doras": null,
+            "rivers": {},
+            "round_info": null,
+            "self_wind": null,
+        });
+        let parsed: RoiCalibration = serde_json::from_value(legacy).expect("legacy parse");
+        assert!(parsed.melds.self_seat.is_none());
+        assert!(parsed.melds.right.is_none());
+        assert!(parsed.melds.across.is_none());
+        assert!(parsed.melds.left.is_none());
     }
 }

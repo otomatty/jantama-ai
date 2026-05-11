@@ -5,12 +5,16 @@ import { EMPTY_ROI_CALIBRATION, type RoiCalibration } from "@/types";
 const SAMPLE = { x: 0.1, y: 0.2, w: 0.3, h: 0.4 };
 
 describe("roiCalibration helpers", () => {
-  it("REGION_DEFS は issue #10 / #12 の 10 領域を網羅する", () => {
+  it("REGION_DEFS は issue #10 / #12 / #14 の 14 領域を網羅する", () => {
     const ids = REGION_DEFS.map((r) => r.id).sort();
     expect(ids).toEqual(
       [
         "doras",
         "hand",
+        "meld_across",
+        "meld_left",
+        "meld_right",
+        "meld_self",
         "river_across",
         "river_left",
         "river_right",
@@ -50,6 +54,14 @@ describe("roiCalibration helpers", () => {
     expect(afterRiver.hand).toEqual(SAMPLE);
     expect(afterRiver.rivers.self).toEqual(SAMPLE);
     expect(afterRiver.rivers.right).toBeNull();
+
+    // issue #14: melds 領域もネスト構造を維持する。
+    const afterMeld = setRegionRect(afterRiver, "meld_self", SAMPLE);
+    expect(afterMeld.melds.self).toEqual(SAMPLE);
+    expect(afterMeld.melds.right).toBeNull();
+    // 既存の他領域は変わらない
+    expect(afterMeld.rivers.self).toEqual(SAMPLE);
+    expect(afterMeld.hand).toEqual(SAMPLE);
   });
 
   it("setRegionRect に null を渡すとクリアできる", () => {
