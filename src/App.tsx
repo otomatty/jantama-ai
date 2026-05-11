@@ -85,15 +85,20 @@ function App() {
   );
 
   const handleInferenceUpdate = useCallback(
-    (inference: InferenceResult, board: GameBoardSummary | null) => {
+    (inference: InferenceResult | null, board: GameBoardSummary | null, timestamp: string) => {
       setInference(inference);
       setBoard(board);
-      setMonitoring({ last_recognized_at: inference.timestamp });
+      // issue #15: 手番でないフレームでも timestamp は届くので、
+      // last_recognized_at は payload の timestamp を使う (= heartbeat)。
+      setMonitoring({ last_recognized_at: timestamp });
       // 直前のサイクルが recognition-error で phase=error に固定されていても、
-      // 次に成功推論が届いたら自動復帰させる。
+      // 次に推奨またはアイドルフレームが届いたら自動復帰させる。
       // 一過性のキャプチャ失敗で UI が永続的にエラー画面に張り付くのを防ぐ。
       setError(null);
-      setPhase(board ? "watching_recommend" : "watching_no_board");
+      // issue #15: inference が null (手番でない) のときは watching_no_board に倒す。
+      // inference 付きでも board.my_turn が false のケースは Rust 側でスキップ
+      // するので発生しない想定 (フェイルセーフは MainScreen 側の MainBody ゲート)。
+      setPhase(inference ? "watching_recommend" : "watching_no_board");
     },
     [setInference, setBoard, setMonitoring, setError, setPhase],
   );

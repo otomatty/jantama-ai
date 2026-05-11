@@ -17,7 +17,11 @@ interface MainScreenProps {
   state: AppState;
   onOpenSettings: () => void;
   onMonitoringChange: (watching: boolean) => void;
-  onInferenceUpdate: (inference: InferenceResult, board: GameBoardSummary | null) => void;
+  onInferenceUpdate: (
+    inference: InferenceResult | null,
+    board: GameBoardSummary | null,
+    timestamp: string,
+  ) => void;
   onRecognitionError: (error: AppError) => void;
 }
 
@@ -59,13 +63,16 @@ export function MainScreen({
       }}
     >
       <StatusBar monitoring={state.monitoring.watching} onOpenSettings={onOpenSettings} />
-      <ContextBar board={state.monitoring.watching && state.inference ? state.board : null} />
+      {/* issue #15: ContextBar は手番外でも盤面サマリ (局・巡目・点棒) を出し続ける。
+          mortal がスキップされている opponent turn でも recognition は走るので
+          state.board は最新値が入っている。 */}
+      <ContextBar board={state.monitoring.watching ? state.board : null} />
 
       <main className="flex flex-1 flex-col overflow-y-auto">
         <MainBody state={state} onOpenSettings={onOpenSettings} />
       </main>
 
-      {state.monitoring.watching && state.inference && state.board && (
+      {state.monitoring.watching && state.inference && state.board && isMyTurn(state.board) && (
         <HandRow board={state.board} inference={state.inference} />
       )}
 
@@ -98,7 +105,12 @@ function MainBody({ state, onOpenSettings }: { state: AppState; onOpenSettings: 
     return <ErrorBody error={state.error} onOpenSettings={onOpenSettings} />;
   }
 
-  if (!state.monitoring.watching || !state.inference) {
+  // issue #15: `inference` が無い (手番でない / mortal スキップ) または
+  // board の my_turn が立っていない場合は IdleBody を表示する。Rust 側で
+  // mortal をスキップしているので、ここに来る `state.inference` 非 null は
+  // 「手番である」と Rust が判定したフレームのみだが、フェイルセーフとして
+  // フロント側でも `isMyTurn` でゲートする。
+  if (!state.monitoring.watching || !state.inference || !isMyTurn(state.board)) {
     return <IdleBody />;
   }
 
@@ -111,4 +123,22 @@ function MainBody({ state, onOpenSettings }: { state: AppState; onOpenSettings: 
       )}
     </div>
   );
+}
+
+/**
+ * 盤面サマリから「今 UI が推奨表示を出す状態か」を判定する (issue #15)。
+ *
+ * `my_turn` / `available_actions` が `null` / `undefined` のとき (旧 Rust
+ * ペイロードや recognition が新スキーマ未対応の過渡期) は、Rust 側の
+ * `should_skip_inference` が「mortal を呼ぶ」側に倒しているのと整合させ、
+ * ここでも `true` 扱いで通す (= 推奨表示を抑制しない)。
+ * 明示的に `false` または空配列のときだけ IdleBody に倒す。
+ */
+function isMyTurn(board: GameBoardSummary | null): boolean {
+  if (!board) return false;
+  if (board.my_turn === false) return false;
+  const actions = board.available_actions;
+  // 明示的に空配列のときだけ抑制。`null` / `undefined` は通す。
+  if (Array.isArray(actions) && actions.length === 0) return false;
+  return true;
 }

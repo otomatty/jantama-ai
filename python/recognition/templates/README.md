@@ -41,6 +41,30 @@ winds/north.png  「北」
 形式は牌テンプレと同じ (グレースケール、サイズ統一推奨)。4 枚揃わないと
 `WindRecognizer` は無効化される (= スタブ値「東」にフォールバック)。
 
+## アクションボタンテンプレ (issue #15)
+
+雀魂卓上の右下に表示される鳴き / リーチ / ツモ / ロン / パスボタンの検出に
+使う。`templates/actions/` 配下に以下を配置する:
+
+```text
+actions/chi.png     チー
+actions/pon.png     ポン
+actions/kan.png     カン (大明槓 / 加槓 / 暗槓 共通の表記を使う)
+actions/riichi.png  リーチ
+actions/tsumo.png   ツモ
+actions/ron.png     ロン
+actions/pass.png    スキップ / パス
+```
+
+形式は牌テンプレと同じ (グレースケール、サイズ統一推奨)。雀魂のボタン位置は
+固定でなく、使えるボタンだけが右詰めで現れるため、`TurnRecognizer` は
+`cv2.matchTemplate` をスライドさせて最大 NCC を見る。テンプレは「ボタン本体
+のアイコン部分」を切り抜くこと (テキスト + 縁取りを含む短冊形を想定)。
+
+全 7 種揃わないと `TurnRecognizer` はボタン検出を無効化する (wind / tile と
+同じ fail-closed 方針)。揃わない間は「手牌が 14 枚あるフレーム」のみが
+自分の手番判定に使われ、鳴き候補は表示されない。
+
 ## Tesseract OCR (issue #12)
 
 局名 (`round_label`)・点棒 (`scores`)・巡目 (`turn`) は `pytesseract` 経由で

@@ -8,9 +8,16 @@ import type { AppError, GameBoardSummary, InferenceResult } from "@/types";
 
 // `useInferenceEvents` 内部の `@tauri-apps/api/event#listen` を差し替えて、
 // 任意のタイミングで Rust 側からの emit を再現できるようにする。
+// issue #15: payload には `inference: InferenceResult | null` と heartbeat 用の
+// `timestamp: string` が含まれる。
 type Handler<T> = (event: { payload: T }) => void;
+type InferencePayload = {
+  inference: InferenceResult | null;
+  board: GameBoardSummary | null;
+  timestamp: string;
+};
 const handlers = {
-  inference: null as Handler<{ inference: InferenceResult; board: GameBoardSummary | null }> | null,
+  inference: null as Handler<InferencePayload> | null,
   error: null as Handler<AppError> | null,
 };
 
@@ -158,9 +165,19 @@ describe("MainScreen", () => {
     expect(handlers.inference).not.toBeNull();
 
     act(() => {
-      handlers.inference!({ payload: { inference: fixture.inference, board: fixture.board } });
+      handlers.inference!({
+        payload: {
+          inference: fixture.inference,
+          board: fixture.board,
+          timestamp: fixture.inference.timestamp,
+        },
+      });
     });
-    expect(onInferenceUpdate).toHaveBeenCalledWith(fixture.inference, fixture.board);
+    expect(onInferenceUpdate).toHaveBeenCalledWith(
+      fixture.inference,
+      fixture.board,
+      fixture.inference.timestamp,
+    );
   });
 
   it("Tauri 環境で recognition-error を受信すると onRecognitionError に AppError を渡す", async () => {
@@ -201,7 +218,11 @@ describe("MainScreen", () => {
     setTauriEnv(false);
     const fixture = SCENARIO_FIXTURES.dahai;
     const stub = runStubInference as unknown as ReturnType<typeof vi.fn>;
-    stub.mockResolvedValue({ inference: fixture.inference, board: fixture.board });
+    stub.mockResolvedValue({
+      inference: fixture.inference,
+      board: fixture.board,
+      timestamp: fixture.inference.timestamp,
+    });
 
     vi.useFakeTimers();
     try {
@@ -230,7 +251,11 @@ describe("MainScreen", () => {
         await Promise.resolve();
       });
       expect(stub).toHaveBeenCalledTimes(1);
-      expect(onInferenceUpdate).toHaveBeenCalledWith(fixture.inference, fixture.board);
+      expect(onInferenceUpdate).toHaveBeenCalledWith(
+        fixture.inference,
+        fixture.board,
+        fixture.inference.timestamp,
+      );
 
       // 5 秒経過で 2 回目が走ることを確認
       await act(async () => {

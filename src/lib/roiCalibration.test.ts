@@ -5,7 +5,7 @@ import { EMPTY_ROI_CALIBRATION, type RoiCalibration } from "@/types";
 const SAMPLE = { x: 0.1, y: 0.2, w: 0.3, h: 0.4 };
 
 describe("roiCalibration helpers", () => {
-  it("REGION_DEFS は issue #10 / #12 / #14 の 14 領域を網羅する", () => {
+  it("REGION_DEFS は issue #10 / #12 / #14 / #15 の 16 領域を網羅する", () => {
     const ids = REGION_DEFS.map((r) => r.id).sort();
     expect(ids).toEqual(
       [
@@ -23,6 +23,9 @@ describe("roiCalibration helpers", () => {
         "scores",
         "self_wind",
         "turn_counter",
+        // issue #15: 自分の手番検出 ROI
+        "turn_timer",
+        "action_buttons",
       ].sort(),
     );
   });

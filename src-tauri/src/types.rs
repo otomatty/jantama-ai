@@ -109,6 +109,15 @@ pub struct RoiCalibration {
     pub scores: Option<RoiRect>,
     #[serde(default)]
     pub turn_counter: Option<RoiRect>,
+    /// 自分の手番でアクションボタン (チー/ポン/カン/リーチ/ツモ/ロン/パス) が
+    /// 表示される領域 (issue #15)。雀魂では使えるボタンだけが右詰めで現れるので、
+    /// ROI は「最も多くのボタンが並んだ時の最大幅」をカバーするよう広めに切る。
+    #[serde(default)]
+    pub action_buttons: Option<RoiRect>,
+    /// 自家ネームプレート周りに出る思考タイマー (円形リング) の領域 (issue #15)。
+    /// `TurnRecognizer.detect_timer_active` が HSV inRange で占有率を見る。
+    #[serde(default)]
+    pub turn_timer: Option<RoiRect>,
 }
 
 fn default_show_llm_reason() -> bool {
@@ -212,6 +221,9 @@ pub struct InferenceResult {
 
 /// PRD §6 / src/types/index.ts の `GameBoardSummary` に対応。
 /// recognition プロセスが返す `tenhou_json` から抽出してフロントへ届ける。
+///
+/// issue #15: `my_turn` と `available_actions` を保持する。フロントの
+/// `MainBody` ゲートと、Rust の `should_skip_inference` 判定の両方で使う。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameBoardSummary {
     pub hand: Vec<String>,
@@ -223,6 +235,17 @@ pub struct GameBoardSummary {
     pub score: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub round_label: Option<String>,
+    /// 「今自分が選択肢を持っているか」(打牌 or 鳴き or 和了 など)。
+    /// `Some(false)` のとき Rust 監視ループは mortal 推論をスキップする。
+    /// `None` (recognition 側がフィールド未対応 = 旧スキーマ) のときはフェイル
+    /// セーフで「mortal を呼ぶ側」に倒す (Codex P1 / CodeRabbit major on PR #47)。
+    #[serde(default)]
+    pub my_turn: Option<bool>,
+    /// 取り得るアクション (`discard` / `riichi` / `chi` / `pon` / `kan` /
+    /// `ron` / `tsumo` / `pass`)。`Some(空配列)` なら recommend 表示を行わない。
+    /// `None` は旧スキーマ互換 (= フィールド欠落)。
+    #[serde(default)]
+    pub available_actions: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -265,6 +288,24 @@ mod tests {
         let parsed: RoiCalibration = serde_json::from_value(legacy).expect("legacy parse");
         assert!(parsed.scores.is_none());
         assert!(parsed.turn_counter.is_none());
+    }
+
+    /// issue #15: action_buttons / turn_timer フィールドが旧 settings.json
+    /// (これらが存在しない) からも `None` で読み戻せる。
+    #[test]
+    fn roi_calibration_deserializes_without_action_buttons_and_turn_timer() {
+        let legacy = serde_json::json!({
+            "hand": null,
+            "doras": null,
+            "rivers": {},
+            "round_info": null,
+            "self_wind": null,
+            "scores": null,
+            "turn_counter": null,
+        });
+        let parsed: RoiCalibration = serde_json::from_value(legacy).expect("legacy parse");
+        assert!(parsed.action_buttons.is_none());
+        assert!(parsed.turn_timer.is_none());
     }
 
     /// issue #10: river 領域のキーは `self` で永続化される

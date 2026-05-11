@@ -7,17 +7,26 @@ import type { AppError, GameBoardSummary, InferenceResult } from "@/types";
 /**
  * Rust 側 (`src-tauri/src/monitor.rs`) が emit する `inference-result` の payload。
  * `InferenceEventPayload` (Rust) と同形。
+ *
+ * issue #15: `inference` は手番でないフレーム (mortal をスキップした場合) で
+ * `null` (またはフィールド欠落) になり得る。`timestamp` は payload 自体の
+ * タイムスタンプで、`last_recognized_at` を heartbeat させるための必須項目。
  */
 interface InferenceEventPayload {
-  inference: InferenceResult;
-  board: GameBoardSummary | null;
+  inference?: InferenceResult | null;
+  board?: GameBoardSummary | null;
+  timestamp: string;
 }
 
 interface UseInferenceEventsOptions {
   /** 監視 ON の間だけ listener を購読する */
   watching: boolean;
   /** `inference-result` 受信時 / ブラウザ単体起動時のスタブ受信時に呼ばれる */
-  onInference: (inference: InferenceResult, board: GameBoardSummary | null) => void;
+  onInference: (
+    inference: InferenceResult | null,
+    board: GameBoardSummary | null,
+    timestamp: string,
+  ) => void;
   /** `recognition-error` 受信時に呼ばれる */
   onError: (error: AppError) => void;
 }
@@ -56,8 +65,8 @@ export function useInferenceEvents({
       let cancelled = false;
       const fire = async () => {
         try {
-          const { inference, board } = await runStubInference();
-          if (!cancelled) onInference(inference, board);
+          const { inference, board, timestamp } = await runStubInference();
+          if (!cancelled) onInference(inference, board, timestamp);
         } catch (e) {
           if (!cancelled) {
             onError(toAppError("unknown", "stub inference failed", e));
@@ -86,7 +95,11 @@ export function useInferenceEvents({
           // 監視 OFF と listener 解除の競合で古いイベントが届くことがあるため
           // コールバック側でも cancelled を確認する
           if (cancelled) return;
-          onInference(event.payload.inference, event.payload.board ?? null);
+          onInference(
+            event.payload.inference ?? null,
+            event.payload.board ?? null,
+            event.payload.timestamp,
+          );
         });
         if (cancelled) {
           tempInferenceUn();

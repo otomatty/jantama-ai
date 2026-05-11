@@ -26,6 +26,11 @@ const COMMON_BOARD: GameBoardSummary = {
   dora_indicators: ["5p"],
   score: 25000,
   round_label: "東1局",
+  // issue #15: ブラウザスタブは「自分の手番」状態の固定値で動くので、
+  // フロントの IdleBody ゲートを通過するよう my_turn=true を立てる。
+  // シナリオ別に available_actions を上書きする (リーチ可能 / 鳴き / 和了)。
+  my_turn: true,
+  available_actions: ["discard"],
 };
 
 export const SCENARIO_FIXTURES: Record<ScenarioKey, ScenarioFixture> = {
@@ -78,7 +83,7 @@ export const SCENARIO_FIXTURES: Record<ScenarioKey, ScenarioFixture> = {
       ],
       safe: ["1z", "4z", "9s"],
     },
-    board: { ...COMMON_BOARD, hand: HAND_TENPAI },
+    board: { ...COMMON_BOARD, hand: HAND_TENPAI, available_actions: ["discard"] },
   },
   riichi: {
     inference: {
@@ -115,7 +120,11 @@ export const SCENARIO_FIXTURES: Record<ScenarioKey, ScenarioFixture> = {
       reason:
         "良形テンパイ・打点上昇余地・順目に余裕があり、リーチ宣言の期待値が圧倒的に高い。三人の捨牌は無筋少なく、放銃リスクは中庸。裏ドラ・一発の打点込みで+0.84の優位。",
     },
-    board: { ...COMMON_BOARD, hand: HAND_TENPAI },
+    board: {
+      ...COMMON_BOARD,
+      hand: HAND_TENPAI,
+      available_actions: ["discard", "riichi"],
+    },
   },
   fuuro: {
     inference: {
@@ -150,7 +159,12 @@ export const SCENARIO_FIXTURES: Record<ScenarioKey, ScenarioFixture> = {
       reason:
         "門前を維持した方が、リーチ込みの打点期待値が高い。中をポンしても役は確定するが、形が崩れて受け入れが14牌→9牌に減少。3巡目で局速はまだ十分。",
     },
-    board: { ...COMMON_BOARD, hand: HAND_MENZEN, turn: 3 },
+    board: {
+      ...COMMON_BOARD,
+      hand: HAND_MENZEN,
+      turn: 3,
+      available_actions: ["pon", "chi", "pass"],
+    },
   },
   agari: {
     inference: {
@@ -179,7 +193,11 @@ export const SCENARIO_FIXTURES: Record<ScenarioKey, ScenarioFixture> = {
       reason:
         "リーチ・ピンフ・ツモ無し・ドラ1で5,200点。トップ目との点差を考えると見逃しの価値はなく、即和了が最善。残り2局・親番なし。",
     },
-    board: { ...COMMON_BOARD, hand: HAND_AGARI },
+    board: {
+      ...COMMON_BOARD,
+      hand: HAND_AGARI,
+      available_actions: ["ron", "pass"],
+    },
   },
 };
 

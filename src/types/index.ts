@@ -50,7 +50,9 @@ export type RoiRegionId =
   | "round_info"
   | "self_wind"
   | "scores"
-  | "turn_counter";
+  | "turn_counter"
+  | "turn_timer"
+  | "action_buttons";
 
 /** ROI キャリブレーション結果 (issue #10 / #12 / #14)。未指定領域は `null`。 */
 export interface RoiCalibration {
@@ -79,6 +81,14 @@ export interface RoiCalibration {
   scores: RoiRect | null;
   /** 巡目カウンタの数字 (issue #12)。 */
   turn_counter: RoiRect | null;
+  /** 自家ネームプレート周りに出る思考タイマー (円形リング) の領域 (issue #15)。 */
+  turn_timer: RoiRect | null;
+  /**
+   * 自分の手番でアクションボタン (チー/ポン/カン/リーチ/ツモ/ロン/パス) が
+   * 表示される領域 (issue #15)。雀魂では使えるボタンだけが右詰めで現れるので、
+   * ROI は「最も多くのボタンが並んだ時の最大幅」をカバーするよう広めに切る。
+   */
+  action_buttons: RoiRect | null;
 }
 
 export const EMPTY_ROI_CALIBRATION: RoiCalibration = {
@@ -90,6 +100,8 @@ export const EMPTY_ROI_CALIBRATION: RoiCalibration = {
   self_wind: null,
   scores: null,
   turn_counter: null,
+  turn_timer: null,
+  action_buttons: null,
 };
 
 export interface AppSettings {
@@ -201,6 +213,23 @@ export interface GameBoardSummary {
   score?: number;
   /** 局名 (例: "東1局") */
   round_label?: string;
+  /**
+   * issue #15: 自分の手番か。`false` の間はフロントが推奨表示を抑制する
+   * (Rust 側でも mortal をスキップ済み)。
+   *
+   * `null` / `undefined` は「recognition プロセスがフィールド未対応 = 旧
+   * スキーマ」のフェイルセーフ状態を表す。Rust 側は `should_skip_inference`
+   * で `null` を「mortal を呼ぶ」側に倒すので、ここに届く `null` は
+   * 旧 schema の互換シナリオでしか発生しない。`isMyTurn` ヘルパで
+   * `true` 扱いするのと一貫させている。
+   */
+  my_turn?: boolean | null;
+  /**
+   * issue #15: 取り得るアクションのリスト。空 (または `my_turn=false`) なら
+   * IdleBody を表示し続ける。`null` / `undefined` は my_turn と同様、旧
+   * スキーマのフェイルセーフ状態。要素は `ActionType` のいずれか。
+   */
+  available_actions?: ActionType[] | null;
 }
 
 // ============================================================
