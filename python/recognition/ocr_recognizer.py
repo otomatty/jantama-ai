@@ -61,9 +61,27 @@ _ROUND_LABEL_WHITELIST = "東南西北1234局"
 _DIGIT_WHITELIST = "0123456789"
 _SCORE_WHITELIST = "0123456789-"
 
+# 点棒の妥当性レンジ。OCR が 1 桁多く読み取る (25000 → 250000) ような誤読は
+# `% 100 == 0` を通過してしまい、tenhou_json 経由で Mortal に異常値が流れて
+# 推論が壊れる (Codex P1 on PR #44)。
+# - 各家: 飛び (箱下 -20000) 〜 ぶっちぎり優勝 (+100000) のレンジで切る。
+#   理論上は数値上限がないが、雀魂の対戦で 100000 を超える持ち点は実質発生しない。
+# - 4 家合計: スタート 100000 から大きく外れない (供託リーチ棒で 1 本につき
+#   -1000、最大 5 本程度を見越して ±5000 を許容)。
+_SCORE_PER_PLAYER_MIN = -20000
+_SCORE_PER_PLAYER_MAX = 100000
+_SCORE_TOTAL_EXPECTED = 100000
+_SCORE_TOTAL_TOLERANCE = 5000
+
 # OCR 前処理で低解像 ROI を拡大する目標高さ (px)。Tesseract は x-height が
 # 30〜35 px 程度のときに精度が出やすい (公式 FAQ より)。
 _OCR_TARGET_HEIGHT = 32
+
+# `image_to_string` のハング保護用タイムアウト (秒)。Tesseract が異常状態に
+# 入って戻ってこないと監視ループ全体が止まるため、短い上限を切る
+# (CodeRabbit Major on PR #44)。pytesseract>=0.3 で `timeout` 引数をサポート。
+# 失敗時は内部で RuntimeError 系を raise し、既存の except で None に降格される。
+_OCR_TIMEOUT_SEC = 1.0
 
 # `pytesseract.image_to_string` の TesseractNotFoundError を例外名で識別 (型 import を避ける)。
 # 重要: `TesseractError` (非ゼロ終了, e.g. `jpn` 言語データ欠落) はここに含めない。
@@ -119,7 +137,12 @@ def _ocr_string(img: np.ndarray, lang: str, whitelist: str) -> str | None:
     config = f"--psm 7 -c tessedit_char_whitelist={whitelist}"
     try:
         # `image_to_string` の戻り値型は実装上 str。型注釈なしの動的呼び出し。
-        text: str = pyt.image_to_string(img, lang=lang, config=config)  # type: ignore[attr-defined]
+        text: str = pyt.image_to_string(  # type: ignore[attr-defined]
+            img,
+            lang=lang,
+            config=config,
+            timeout=_OCR_TIMEOUT_SEC,
+        )
     except Exception as exc:  # noqa: BLE001 — Tesseract 不在 / 内部エラーを統一して握る
         name = type(exc).__name__
         if name in _TESSERACT_NOT_FOUND_NAMES:
@@ -213,7 +236,13 @@ def recognize_scores(
         # の sanity check として 100 で割り切れない値は失敗扱い (gemini medium on PR #44)。
         if value % 100 != 0:
             return None
+        if not _SCORE_PER_PLAYER_MIN <= value <= _SCORE_PER_PLAYER_MAX:
+            return None
         scores.append(value)
+    # 4 家合計が 100000 から大きくずれていたら誰かの桁が落ちて / 増えている
+    # と判断して all-or-nothing で失敗 (Codex P1 on PR #44)。
+    if abs(sum(scores) - _SCORE_TOTAL_EXPECTED) > _SCORE_TOTAL_TOLERANCE:
+        return None
     return scores
 
 

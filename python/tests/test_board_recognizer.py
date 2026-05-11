@@ -214,7 +214,7 @@ class _FakePytesseract:
         self.calls: list[tuple[Any, str, str]] = []
 
     def image_to_string(
-        self, img: np.ndarray, lang: str = "eng", config: str = ""
+        self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
     ) -> str:  # noqa: ARG002
         self.calls.append((img.shape, lang, config))
         if isinstance(self._returns, Exception):
@@ -274,7 +274,7 @@ def test_recognize_scores_returns_all_four() -> None:
             self.calls = 0
 
         def image_to_string(
-            self, img: np.ndarray, lang: str = "eng", config: str = ""
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
         ) -> str:  # noqa: ARG002
             self.calls += 1
             return next(values)
@@ -293,7 +293,7 @@ def test_recognize_scores_partial_failure_returns_none() -> None:
 
     class _Side:
         def image_to_string(
-            self, img: np.ndarray, lang: str = "eng", config: str = ""
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
         ) -> str:  # noqa: ARG002
             return next(values)
 
@@ -310,7 +310,7 @@ def test_recognize_scores_negative_value() -> None:
 
     class _Side:
         def image_to_string(
-            self, img: np.ndarray, lang: str = "eng", config: str = ""
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
         ) -> str:  # noqa: ARG002
             return next(values)
 
@@ -319,6 +319,85 @@ def test_recognize_scores_negative_value() -> None:
     bgr[5:35, 5:155] = 255
     scores = ocr_recognizer.recognize_scores(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
     assert scores == [50000, -5000, 30000, 25000]
+
+
+def test_recognize_scores_out_of_range_rejected() -> None:
+    """Codex P1 on PR #44: 1 桁多く読まれた (25000 → 250000) ケースを fail-closed。
+
+    各家 100000 超は ありえない (上限) ため、合計整合性に達する前のレンジ
+    チェックで `None` に倒れる。
+    """
+    values = iter(["250000", "25000", "25000", "25000"])
+
+    class _Side:
+        def image_to_string(
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
+        ) -> str:  # noqa: ARG002
+            return next(values)
+
+    _install_fake_pytesseract(_Side())
+    bgr = np.full((40, 160, 3), 128, dtype=np.uint8)
+    bgr[5:35, 5:155] = 255
+    assert ocr_recognizer.recognize_scores(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) is None
+
+
+def test_recognize_scores_total_mismatch_rejected() -> None:
+    """各家は範囲内でも合計が 100000 から大きくずれたら all-or-nothing で `None`。"""
+    # 25000 + 25000 + 25000 + 10000 = 85000 → 100000 から 15000 ずれ (tolerance 5000)
+    values = iter(["25000", "25000", "25000", "10000"])
+
+    class _Side:
+        def image_to_string(
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
+        ) -> str:  # noqa: ARG002
+            return next(values)
+
+    _install_fake_pytesseract(_Side())
+    bgr = np.full((40, 160, 3), 128, dtype=np.uint8)
+    bgr[5:35, 5:155] = 255
+    assert ocr_recognizer.recognize_scores(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) is None
+
+
+def test_recognize_scores_within_tolerance_accepted() -> None:
+    """供託リーチ棒 3 本ぶん (-3000) の合計ずれは tolerance 内で採用される。"""
+    # 25000 + 25000 + 25000 + 22000 = 97000 → 100000 から 3000 ずれ (tolerance 5000)
+    values = iter(["25000", "25000", "25000", "22000"])
+
+    class _Side:
+        def image_to_string(
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
+        ) -> str:  # noqa: ARG002
+            return next(values)
+
+    _install_fake_pytesseract(_Side())
+    bgr = np.full((40, 160, 3), 128, dtype=np.uint8)
+    bgr[5:35, 5:155] = 255
+    assert ocr_recognizer.recognize_scores(bgr, RoiRect(0.0, 0.0, 1.0, 1.0)) == [
+        25000,
+        25000,
+        25000,
+        22000,
+    ]
+
+
+def test_ocr_string_passes_timeout_to_pytesseract() -> None:
+    """CodeRabbit Major on PR #44: image_to_string にハング保護 timeout を渡している。"""
+    captured: dict[str, Any] = {}
+
+    class _CapturingFake:
+        def image_to_string(
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
+        ) -> str:  # noqa: ARG002
+            captured.update(kwargs)
+            return "東1局"
+
+    _install_fake_pytesseract(_CapturingFake())
+    bgr = np.full((40, 80, 3), 128, dtype=np.uint8)
+    bgr[5:35, 5:75] = 255
+    ocr_recognizer.recognize_round_label(bgr, RoiRect(0.0, 0.0, 1.0, 1.0))
+    assert "timeout" in captured, "timeout kwarg must be forwarded to pytesseract"
+    assert isinstance(captured["timeout"], (int, float))
+    assert captured["timeout"] > 0
 
 
 def test_recognize_turn_in_range(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -378,7 +457,7 @@ def test_ocr_short_circuits_after_tesseract_not_found(
             self.calls = 0
 
         def image_to_string(
-            self, img: np.ndarray, lang: str = "eng", config: str = ""
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
         ) -> str:  # noqa: ARG002
             self.calls += 1
             raise _TesseractNotFoundError("simulated")
@@ -542,7 +621,7 @@ def test_board_recognizer_drops_scores_when_self_wind_not_recognized(
 
     class _Side:
         def image_to_string(
-            self, img: np.ndarray, lang: str = "eng", config: str = ""
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
         ) -> str:  # noqa: ARG002
             return next(values)
 
@@ -572,7 +651,7 @@ def test_board_recognizer_accepts_scores_when_both_recognized(tmp_path: Path) ->
 
     class _Side:
         def image_to_string(
-            self, img: np.ndarray, lang: str = "eng", config: str = ""
+            self, img: np.ndarray, lang: str = "eng", config: str = "", **kwargs: Any
         ) -> str:  # noqa: ARG002
             return next(values)
 
