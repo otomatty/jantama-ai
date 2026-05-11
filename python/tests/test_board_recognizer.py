@@ -671,3 +671,102 @@ def test_board_recognizer_accepts_scores_when_both_recognized(tmp_path: Path) ->
     )
     assert tenhou["self_wind"] == "南"
     assert tenhou["scores"] == [25000, 30000, 20000, 25000]
+
+
+# ----------------------- my_turn / available_actions (issue #15) -----------
+
+
+def test_default_tenhou_json_has_turn_fields() -> None:
+    """issue #15: 既定 tenhou_json に my_turn / available_actions が含まれる。"""
+    assert DEFAULT_TENHOU_JSON["my_turn"] is False
+    assert DEFAULT_TENHOU_JSON["available_actions"] == []
+
+
+def test_board_recognizer_my_turn_false_when_no_signals(tmp_path: Path) -> None:
+    """テンプレ無し + ROI 無し + 手牌 0 牌で my_turn=False, actions=[]."""
+    rec = BoardRecognizer(tmp_path)
+    bgr = np.zeros((100, 100, 3), dtype=np.uint8)
+    tenhou, _ = rec.recognize(bgr, {})
+    assert tenhou["my_turn"] is False
+    assert tenhou["available_actions"] == []
+
+
+def test_board_recognizer_my_turn_true_on_14_tile_hand_with_debounce(
+    tmp_path: Path,
+) -> None:
+    """手牌 14 牌のフレームが 2 回連続したら my_turn=True に flip する (デバウンス)。"""
+    _write_all_tile_templates(tmp_path)
+    rec = BoardRecognizer(tmp_path)
+
+    # 14 牌のハンド画像を準備。
+    grays = [_make_pattern(TILE_CODES.index(c)) for c in TILE_CODES[:HAND_SLOTS]]
+    canvas_gray = np.concatenate(grays, axis=1)
+    bgr = cv2.cvtColor(canvas_gray, cv2.COLOR_GRAY2BGR)
+    calib = {"hand": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}}
+
+    # 1 フレーム目はまだ flip しない (debounce 1 つ目)
+    tenhou_1, _ = rec.recognize(bgr, calib)
+    assert tenhou_1["my_turn"] is False, "debounce 1st frame must not flip"
+    assert tenhou_1["available_actions"] == []
+
+    # 2 フレーム目で my_turn=True、available_actions=["discard"]
+    tenhou_2, _ = rec.recognize(bgr, calib)
+    assert tenhou_2["my_turn"] is True
+    assert tenhou_2["available_actions"] == ["discard"]
+
+
+def test_board_recognizer_my_turn_immediate_when_button_detected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ボタン検出時はデバウンスを経ずに 1 フレームで my_turn=True を返す。
+
+    `TurnRecognizer.detect_buttons` を monkeypatch で `["pon","pass"]` 固定にして
+    `_derive_turn_state` の鳴き経路を踏ませる。
+    """
+    rec = BoardRecognizer(tmp_path)
+    monkeypatch.setattr(rec.turn_recognizer, "detect_buttons", lambda *_a, **_k: ["pon", "pass"])
+    monkeypatch.setattr(rec.turn_recognizer, "detect_timer_active", lambda *_a, **_k: False)
+
+    bgr = np.zeros((100, 100, 3), dtype=np.uint8)
+    tenhou, _ = rec.recognize(bgr, {})
+    assert tenhou["my_turn"] is True
+    # ACTION_KEYS の順序 ("chi","pon","kan","ron","pass") で並ぶ
+    assert tenhou["available_actions"] == ["pon", "pass"]
+
+
+def test_board_recognizer_my_turn_merges_riichi_on_discard_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """手牌 14 牌 + リーチボタン検出で `["discard", "riichi"]` が出る。"""
+    _write_all_tile_templates(tmp_path)
+    rec = BoardRecognizer(tmp_path)
+    monkeypatch.setattr(rec.turn_recognizer, "detect_buttons", lambda *_a, **_k: ["riichi"])
+    monkeypatch.setattr(rec.turn_recognizer, "detect_timer_active", lambda *_a, **_k: False)
+
+    grays = [_make_pattern(TILE_CODES.index(c)) for c in TILE_CODES[:HAND_SLOTS]]
+    canvas_gray = np.concatenate(grays, axis=1)
+    bgr = cv2.cvtColor(canvas_gray, cv2.COLOR_GRAY2BGR)
+    calib = {"hand": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}}
+
+    # ボタン検出があるので debounce 不要 (即時 True)
+    tenhou, _ = rec.recognize(bgr, calib)
+    assert tenhou["my_turn"] is True
+    assert tenhou["available_actions"] == ["discard", "riichi"]
+
+
+def test_board_recognizer_my_turn_actions_are_subset_of_known_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """available_actions は ACTION_KEYS ∪ {discard} の部分集合に必ず収まる。"""
+    from recognition.turn_recognizer import ACTION_KEYS
+
+    valid = set(ACTION_KEYS) | {"discard"}
+    rec = BoardRecognizer(tmp_path)
+    monkeypatch.setattr(
+        rec.turn_recognizer, "detect_buttons", lambda *_a, **_k: ["chi", "pon", "pass"]
+    )
+    monkeypatch.setattr(rec.turn_recognizer, "detect_timer_active", lambda *_a, **_k: False)
+
+    bgr = np.zeros((100, 100, 3), dtype=np.uint8)
+    tenhou, _ = rec.recognize(bgr, {})
+    assert all(a in valid for a in tenhou["available_actions"])

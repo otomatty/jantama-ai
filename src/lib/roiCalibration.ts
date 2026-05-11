@@ -34,6 +34,10 @@ export const REGION_DEFS: readonly RoiRegionDef[] = [
   { id: "self_wind", label: "自風" },
   { id: "scores", label: "点棒" },
   { id: "turn_counter", label: "巡目" },
+  // 手番検出 (issue #15)。順序は最後にして、雀魂卓面の見回し的にも下から右下の
+  // ボタン領域へ視線が抜ける流れに合わせる。
+  { id: "turn_timer", label: "思考タイマー" },
+  { id: "action_buttons", label: "アクションボタン" },
 ] as const;
 
 /** 指定領域の rect を取得する。未指定なら `null`。 */
@@ -67,6 +71,10 @@ export function getRegionRect(calibration: RoiCalibration, region: RoiRegionId):
       return calibration.melds.across;
     case "meld_left":
       return calibration.melds.left;
+    case "turn_timer":
+      return calibration.turn_timer;
+    case "action_buttons":
+      return calibration.action_buttons;
   }
 }
 
@@ -110,6 +118,10 @@ export function setRegionRect(
       return { ...calibration, melds: { ...calibration.melds, across: rect } };
     case "meld_left":
       return { ...calibration, melds: { ...calibration.melds, left: rect } };
+    case "turn_timer":
+      return { ...calibration, turn_timer: rect };
+    case "action_buttons":
+      return { ...calibration, action_buttons: rect };
   }
 }
 

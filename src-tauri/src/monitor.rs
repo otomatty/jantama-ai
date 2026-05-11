@@ -147,10 +147,18 @@ impl Drop for MonitorHandle {
 
 /// `inference-result` イベントの payload。
 /// フロント側 (`src/types/index.ts`) の `InferenceResult` + `GameBoardSummary` に対応。
+///
+/// issue #15: `inference` を Optional に変更。`my_turn=false` のフレームでは
+/// 監視ループが mortal をスキップして `inference=None` を emit するため。
+/// `timestamp` は payload 自体のタイムスタンプ (mortal が走らなくても
+/// last_recognized_at を heartbeat させるため必須)。
 #[derive(Debug, Clone, Serialize)]
 pub struct InferenceEventPayload {
-    pub inference: InferenceResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference: Option<InferenceResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub board: Option<GameBoardSummary>,
+    pub timestamp: String,
 }
 
 /// `recognition-error` イベントの payload。
@@ -260,8 +268,12 @@ pub fn start<R: Runtime>(
                 mortal_proc.as_ref(),
                 &roi_for_thread,
             ) {
-                Ok((inference, board)) => {
-                    let payload = InferenceEventPayload { inference, board };
+                Ok((inference, board, timestamp)) => {
+                    let payload = InferenceEventPayload {
+                        inference,
+                        board,
+                        timestamp,
+                    };
                     if let Err(e) = app_for_thread.emit("inference-result", &payload) {
                         warn!(target: "monitor", "emit inference-result failed: {}", e);
                     }
@@ -427,14 +439,18 @@ fn map_mortal_error(e: PythonProcError) -> CycleError {
     }
 }
 
-/// 1 フレーム分の capture → recognition → mortal を実行する。
+/// 1 フレーム分の capture → recognition → (条件付き) mortal を実行する。
+///
+/// issue #15: `my_turn=false` のフレームでは mortal を呼ばずに
+/// `(None, board, timestamp)` を返す。フロントは `inference: null` を受けて
+/// IdleBody 表示を維持する。
 fn run_cycle(
     capture_target: &str,
     frame_id: i64,
     recognition: &PythonProcess,
     mortal: &PythonProcess,
     roi_calibration: &RoiCalibration,
-) -> Result<(InferenceResult, Option<GameBoardSummary>), CycleError> {
+) -> Result<(Option<InferenceResult>, Option<GameBoardSummary>, String), CycleError> {
     if capture_target.trim().is_empty() {
         return Err(CycleError::NoTarget);
     }
@@ -496,6 +512,13 @@ fn run_cycle(
         .ok_or_else(|| CycleError::RecognitionInvalid("missing tenhou_json".into()))?;
     let board = build_board_summary(&tenhou_json);
 
+    // issue #15: 手番でないフレームでは mortal を呼ばない。recognition だけ
+    // 走らせて board のみを emit することで、opponent turn のコストを大幅に
+    // 削減する。`should_skip_inference` が true なら早期 return。
+    if should_skip_inference(board.as_ref()) {
+        return Ok((None, board, Utc::now().to_rfc3339()));
+    }
+
     // mortal: tenhou_json 送信 → 推奨候補受信
     let infer_req = serde_json::json!({
         "type": "infer",
@@ -552,14 +575,14 @@ fn run_cycle(
     let inference = InferenceResult {
         recommended,
         candidates,
-        timestamp,
+        timestamp: timestamp.clone(),
         primary_label,
         reason: None,
         danger: None,
         safe: None,
     };
 
-    Ok((inference, board))
+    Ok((Some(inference), board, timestamp))
 }
 
 /// run_cycle で発生したエラーを処理する:
@@ -774,6 +797,24 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
         .get("round_label")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    // issue #15: my_turn / available_actions は寛容に抽出する。recognition が
+    // 旧スキーマで返した (= フィールドが存在しない) 場合は false / 空配列に
+    // 倒すことで、Phase C 前の tenhou_json も壊さずに通過させる。ただし「フィールド
+    // 欠落」状態では Rust 側で「skip しない」(= 従来通り mortal を呼ぶ) 方向に
+    // フェイルセーフする (`should_skip_inference` 参照)。
+    let my_turn = obj
+        .get("my_turn")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let available_actions: Vec<String> = obj
+        .get("available_actions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     Some(GameBoardSummary {
         hand,
         self_wind,
@@ -782,7 +823,22 @@ fn build_board_summary(tenhou: &serde_json::Value) -> Option<GameBoardSummary> {
         dora_indicators,
         score,
         round_label,
+        my_turn,
+        available_actions,
     })
+}
+
+/// `my_turn=false` または `available_actions` が空のとき、mortal 推論を
+/// スキップして monitor ループが軽くなるようにする (issue #15)。
+///
+/// `board` が None のとき (= recognition のスキーマ崩れ / 必須フィールド欠落)
+/// は「念のため mortal を呼ぶ」側に倒す。これがないと、recognition だけが
+/// 一時的に壊れた状態で UI が完全に IdleBody に張り付き、デバッグしにくくなる。
+fn should_skip_inference(board: Option<&GameBoardSummary>) -> bool {
+    match board {
+        None => false,
+        Some(b) => !b.my_turn || b.available_actions.is_empty(),
+    }
 }
 
 /// `request_line_with_filter` のクロージャから呼ぶための受信応答 id 判定。
@@ -930,6 +986,8 @@ fn sanitize_roi_calibration(src: &RoiCalibration) -> RoiCalibration {
         self_wind: sanitize_opt_rect(src.self_wind),
         scores: sanitize_opt_rect(src.scores),
         turn_counter: sanitize_opt_rect(src.turn_counter),
+        action_buttons: sanitize_opt_rect(src.action_buttons),
+        turn_timer: sanitize_opt_rect(src.turn_timer),
     }
 }
 
@@ -1145,6 +1203,9 @@ mod tests {
         // issue #12: scores / turn_counter も同じく無効値は落とす
         roi.scores = Some(bad_negative);
         roi.turn_counter = Some(good);
+        // issue #15: action_buttons / turn_timer も同じく無効値は落とす
+        roi.action_buttons = Some(good);
+        roi.turn_timer = Some(bad_overflow);
 
         let cleaned = sanitize_roi_calibration(&roi);
         assert!(cleaned.hand.is_some());
@@ -1158,5 +1219,83 @@ mod tests {
             "scores with negative x must be dropped"
         );
         assert!(cleaned.turn_counter.is_some());
+        assert!(cleaned.action_buttons.is_some());
+        assert!(
+            cleaned.turn_timer.is_none(),
+            "turn_timer with x+w > 1.0 must be dropped"
+        );
+    }
+
+    /// issue #15: `build_board_summary` は `my_turn` / `available_actions` を
+    /// tenhou_json から抽出し、欠落時は安全な既定値 (false / 空配列) で埋める。
+    #[test]
+    fn build_board_summary_extracts_my_turn_and_actions() {
+        let tenhou = serde_json::json!({
+            "hand": ["1m", "2m"],
+            "self_wind": "東",
+            "round_wind": "東",
+            "turn": 3,
+            "dora_indicators": ["5p"],
+            "scores": [25000, 25000, 25000, 25000],
+            "my_turn": true,
+            "available_actions": ["discard", "riichi"],
+        });
+        let board = build_board_summary(&tenhou).expect("summary");
+        assert!(board.my_turn);
+        assert_eq!(board.available_actions, vec!["discard", "riichi"]);
+    }
+
+    /// issue #15: 旧 tenhou_json (my_turn / available_actions 無し) は
+    /// `(false, vec![])` で埋まる (互換性レグレッション)。
+    #[test]
+    fn build_board_summary_defaults_when_my_turn_missing() {
+        let tenhou = serde_json::json!({
+            "hand": [],
+            "self_wind": "東",
+            "round_wind": "東",
+            "turn": 1,
+            "dora_indicators": [],
+            "scores": [25000, 25000, 25000, 25000],
+        });
+        let board = build_board_summary(&tenhou).expect("summary");
+        assert!(!board.my_turn);
+        assert!(board.available_actions.is_empty());
+    }
+
+    /// issue #15: `should_skip_inference` の判定マトリクス。
+    /// - board None → false (フェイルセーフで mortal を呼ぶ側)
+    /// - my_turn=false → true
+    /// - my_turn=true + actions empty → true
+    /// - my_turn=true + actions 非空 → false
+    #[test]
+    fn should_skip_inference_decision_matrix() {
+        assert!(!should_skip_inference(None));
+
+        let opponent_turn = GameBoardSummary {
+            hand: vec![],
+            self_wind: "東".into(),
+            round_wind: "東".into(),
+            turn: 1,
+            dora_indicators: vec![],
+            score: None,
+            round_label: None,
+            my_turn: false,
+            available_actions: vec!["discard".into()],
+        };
+        assert!(should_skip_inference(Some(&opponent_turn)));
+
+        let my_turn_no_actions = GameBoardSummary {
+            my_turn: true,
+            available_actions: vec![],
+            ..opponent_turn.clone()
+        };
+        assert!(should_skip_inference(Some(&my_turn_no_actions)));
+
+        let my_turn_with_action = GameBoardSummary {
+            my_turn: true,
+            available_actions: vec!["discard".into()],
+            ..opponent_turn
+        };
+        assert!(!should_skip_inference(Some(&my_turn_with_action)));
     }
 }

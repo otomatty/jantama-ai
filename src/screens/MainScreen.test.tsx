@@ -158,9 +158,19 @@ describe("MainScreen", () => {
     expect(handlers.inference).not.toBeNull();
 
     act(() => {
-      handlers.inference!({ payload: { inference: fixture.inference, board: fixture.board } });
+      handlers.inference!({
+        payload: {
+          inference: fixture.inference,
+          board: fixture.board,
+          timestamp: fixture.inference.timestamp,
+        },
+      });
     });
-    expect(onInferenceUpdate).toHaveBeenCalledWith(fixture.inference, fixture.board);
+    expect(onInferenceUpdate).toHaveBeenCalledWith(
+      fixture.inference,
+      fixture.board,
+      fixture.inference.timestamp,
+    );
   });
 
   it("Tauri 環境で recognition-error を受信すると onRecognitionError に AppError を渡す", async () => {
@@ -201,7 +211,11 @@ describe("MainScreen", () => {
     setTauriEnv(false);
     const fixture = SCENARIO_FIXTURES.dahai;
     const stub = runStubInference as unknown as ReturnType<typeof vi.fn>;
-    stub.mockResolvedValue({ inference: fixture.inference, board: fixture.board });
+    stub.mockResolvedValue({
+      inference: fixture.inference,
+      board: fixture.board,
+      timestamp: fixture.inference.timestamp,
+    });
 
     vi.useFakeTimers();
     try {
@@ -230,7 +244,11 @@ describe("MainScreen", () => {
         await Promise.resolve();
       });
       expect(stub).toHaveBeenCalledTimes(1);
-      expect(onInferenceUpdate).toHaveBeenCalledWith(fixture.inference, fixture.board);
+      expect(onInferenceUpdate).toHaveBeenCalledWith(
+        fixture.inference,
+        fixture.board,
+        fixture.inference.timestamp,
+      );
 
       // 5 秒経過で 2 回目が走ることを確認
       await act(async () => {

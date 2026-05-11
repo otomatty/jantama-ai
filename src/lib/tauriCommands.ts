@@ -77,6 +77,8 @@ function normalizeSettings(raw: AppSettings): AppSettings {
       self_wind: roi.self_wind ?? null,
       scores: roi.scores ?? null,
       turn_counter: roi.turn_counter ?? null,
+      turn_timer: roi.turn_timer ?? null,
+      action_buttons: roi.action_buttons ?? null,
     },
   };
 }
@@ -108,16 +110,23 @@ export async function stopMonitoring(): Promise<void> {
  * board は `null` を返す。以前は scenarios.board を併用していたが、
  * 5 秒毎のポーリングで推論ペイロードと無関係な手牌・局・巡目が
  * 切り替わってしまい、UI 上で推奨と盤面が乖離するため廃止した。
+ *
+ * issue #15: `timestamp` は heartbeat 用。手番でないフレームでは `inference`
+ * が null になり得るため、`last_recognized_at` の更新は payload の timestamp
+ * を使う (App.tsx の handleInferenceUpdate)。スタブ経路は inference 非 null
+ * なので `inference.timestamp` をそのまま流用すれば良い。
  */
 export async function runStubInference(): Promise<{
   inference: InferenceResult;
   board: GameBoardSummary | null;
+  timestamp: string;
 }> {
   if (!isTauri()) {
-    return nextStubScenario();
+    const { inference, board } = nextStubScenario();
+    return { inference, board, timestamp: inference.timestamp };
   }
   const inference = await invoke<InferenceResult>("run_stub_inference");
-  return { inference, board: null };
+  return { inference, board: null, timestamp: inference.timestamp };
 }
 
 /**
