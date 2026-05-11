@@ -13,9 +13,17 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from common import read_request, setup_stderr_logging, write_response
+# `python mortal/main.py` 直叩きでも vendor.mortal.mortal.* を import できるよう
+# python/ を sys.path に追加してから common / 上流 Mortal をロードする。
+# `uv run jantama-mortal` 経由なら mortal/__init__.py が同様の調整を行う。
+_PYTHON_ROOT = Path(__file__).resolve().parent.parent
+if str(_PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PYTHON_ROOT))
+
+from common import read_request, setup_stderr_logging, write_response  # noqa: E402
 
 logger = setup_stderr_logging("mortal")
 
