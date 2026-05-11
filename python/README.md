@@ -28,7 +28,14 @@ uv sync --extra mortal
 `python/vendor/mortal/` に [Equim-chan/Mortal](https://github.com/Equim-chan/Mortal)
 を git submodule として配置している (issue #17 / PRD §10 Phase D)。
 
-- ライセンスは **AGPL-3.0** (`python/vendor/mortal/LICENSE`)。再配布禁止。
+- ライセンスは **AGPL-3.0** (`python/vendor/mortal/LICENSE`)。
+  AGPL-3.0 自体は (a) 著作権表示・ライセンス本文の同梱、(b) 改変時の変更箇所
+  明示、(c) ネットワーク経由でユーザに提供する場合の対応ソース公開、といった
+  条件下での再配布を許可しています。
+  本リポジトリでは PRD §10 の方針に従い、Mortal のソース・学習済みモデル
+  のいずれも成果物に同梱・再配布せず、利用者が submodule 経由で直接取得
+  する運用とします (= プロジェクト方針としての非配布であり、ライセンス制限
+  ではありません)。
 - `vendor/mortal/mortal/` 配下を Python の namespace package として参照する。
   `mortal/__init__.py` および `mortal/main.py` で `python/` ディレクトリを
   `sys.path` に追加しているため、以下のように import できる:
