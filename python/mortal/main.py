@@ -27,19 +27,36 @@ if str(_PYTHON_ROOT) not in sys.path:
 
 from common import read_request, setup_stderr_logging, write_response  # noqa: E402
 from mortal.mortal_engine import ModelLoadError, MortalEngine  # noqa: E402
+from mortal.snapshot_to_mjai import SnapshotToMjaiConverter  # noqa: E402
 
 logger = setup_stderr_logging("mortal")
 
+# mortal プロセス寿命 = recognition セッション寿命なので、converter は 1 インスタンスを
+# プロセススコープで保持する。snapshot_to_mjai.py のドキュメンテーション通り、
+# 連続するスナップショットの差分を取るために状態 (前フレーム手牌・河長さ等) を保持する。
+_converter = SnapshotToMjaiConverter()
 
-def stub_inference(_tenhou_json: dict[str, Any]) -> dict[str, Any]:
-    """旧 `--stub` モード相当のサンプル応答 (後方互換用 thin wrapper)。"""
-    return MortalEngine.stub().infer(_tenhou_json)
 
+def handle_infer(
+    engine: MortalEngine,
+    req: dict[str, Any],
+    converter: SnapshotToMjaiConverter | None = None,
+) -> dict[str, Any]:
+    """`infer` リクエストを処理する。
 
-def handle_infer(engine: MortalEngine, req: dict[str, Any]) -> dict[str, Any]:
+    1. `tenhou_json` (recognition プロセスが emit した盤面スナップショット)
+       を `SnapshotToMjaiConverter` に渡し、前フレからの差分 mjai event 列を得る。
+    2. `MortalEngine.infer(mjai_events)` で整形済みレスポンスを得る。
+    3. `{"type": "result", "id": ...}` を付加して返す。
+
+    `converter` 引数はテスト時に独立インスタンスを差し込めるよう公開する。
+    本番呼び出しではモジュールスコープの `_converter` がデフォルト。
+    """
     req_id = req.get("id", -1)
     tenhou = req.get("tenhou_json", {})
-    result = engine.infer(tenhou)
+    conv = converter if converter is not None else _converter
+    mjai_events = conv.convert(tenhou)
+    result = engine.infer(mjai_events)
     return {"type": "result", "id": req_id, **result}
 
 

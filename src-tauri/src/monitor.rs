@@ -571,7 +571,7 @@ fn run_cycle(
         .map(str::to_string)
         .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-    let primary_label = format_primary_label(&recommended);
+    let primary_label = resolve_primary_label(&infer_parsed, &recommended);
 
     let inference = InferenceResult {
         recommended,
@@ -735,6 +735,28 @@ fn handle_cycle_error<R: Runtime>(
             }
         }
     }
+}
+
+/// `primary_label` を解決する (issue #20)。
+///
+/// Python (action_formatter) が `primary_label` を emit するようになったため、
+/// 本関数は Python 応答を優先し、欠落 / 空文字列の場合のみ
+/// `format_primary_label` で再生成する。この優先順位により、Python 側で
+/// 日本語表記をリッチに拡張しても Rust の固定マッピングに上書きされて
+/// 消失する事故を防ぐ。
+fn resolve_primary_label(
+    infer_parsed: &serde_json::Value,
+    recommended: &RecommendationCandidate,
+) -> Option<String> {
+    if let Some(label) = infer_parsed
+        .get("primary_label")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(label.to_string());
+    }
+    format_primary_label(recommended)
 }
 
 /// 推奨候補から UI のプライマリ表示文を組み立てる。
@@ -1349,5 +1371,58 @@ mod tests {
             ..base
         };
         assert!(!should_skip_inference(Some(&my_turn_only)));
+    }
+
+    fn make_recommended(action_type: ActionType, tile: Option<&str>) -> RecommendationCandidate {
+        RecommendationCandidate {
+            tile: tile.map(str::to_string),
+            action_type,
+            expected_value: 0.0,
+            action_label: None,
+            probability: None,
+            detail: None,
+        }
+    }
+
+    /// issue #20: Python (action_formatter) が emit した `primary_label` が
+    /// 非空で来た場合、Rust 側の `format_primary_label` で上書きされず
+    /// そのまま採用される。これにより Python 側で日本語表記を拡張しても
+    /// Rust の固定マッピングに上書きされて消失する事故を防ぐ。
+    #[test]
+    fn resolve_primary_label_prefers_python_supplied() {
+        let infer_parsed = serde_json::json!({
+            "primary_label": "6m を切る",
+            "recommended": {},
+        });
+        let rec = make_recommended(ActionType::Discard, Some("9p"));
+        // recommended.tile="9p" だが Python 指定の "6m を切る" を優先する。
+        assert_eq!(
+            resolve_primary_label(&infer_parsed, &rec).as_deref(),
+            Some("6m を切る")
+        );
+    }
+
+    /// `primary_label` フィールド欠落時 (旧 mortal 応答互換 / Phase D5 以前) は
+    /// Rust 側の `format_primary_label` で `recommended` から再生成する。
+    #[test]
+    fn resolve_primary_label_falls_back_when_missing() {
+        let infer_parsed = serde_json::json!({});
+        let rec = make_recommended(ActionType::Discard, Some("6m"));
+        assert_eq!(
+            resolve_primary_label(&infer_parsed, &rec).as_deref(),
+            Some("6m を切る")
+        );
+    }
+
+    /// 空文字列 / whitespace-only の `primary_label` は欠落と同等に扱い、
+    /// fallback で Rust 側生成に倒す (UI に空ラベルが渡るのを防ぐ)。
+    #[test]
+    fn resolve_primary_label_falls_back_on_empty_string() {
+        let infer_parsed = serde_json::json!({"primary_label": "   "});
+        let rec = make_recommended(ActionType::Riichi, None);
+        assert_eq!(
+            resolve_primary_label(&infer_parsed, &rec).as_deref(),
+            Some("リーチ")
+        );
     }
 }
