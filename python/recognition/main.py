@@ -25,12 +25,14 @@ import cv2
 import numpy as np
 
 from common import read_request, setup_stderr_logging, write_response
+from recognition.river_recognizer import RiverRecognizer
 from recognition.tile_recognizer import RoiRect, TileRecognizer
 
 logger = setup_stderr_logging("recognition")
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 _recognizer: TileRecognizer | None = None
+_river_recognizer: RiverRecognizer | None = None
 
 
 def _get_recognizer() -> TileRecognizer:
@@ -38,6 +40,13 @@ def _get_recognizer() -> TileRecognizer:
     if _recognizer is None:
         _recognizer = TileRecognizer(_TEMPLATE_DIR)
     return _recognizer
+
+
+def _get_river_recognizer() -> RiverRecognizer:
+    global _river_recognizer
+    if _river_recognizer is None:
+        _river_recognizer = RiverRecognizer(_TEMPLATE_DIR)
+    return _river_recognizer
 
 
 def stub_tenhou_json() -> dict[str, Any]:
@@ -81,12 +90,20 @@ def handle_frame(req: dict[str, Any]) -> dict[str, Any]:
         bgr = _decode_frame(req.get("image_b64"))
         if bgr is not None:
             roi_calib = req.get("roi_calibration") or {}
-            hand_roi = RoiRect.from_dict(
-                roi_calib.get("hand") if isinstance(roi_calib, dict) else None
-            )
+            roi_calib = roi_calib if isinstance(roi_calib, dict) else {}
+            hand_roi = RoiRect.from_dict(roi_calib.get("hand"))
             tiles, conf = _get_recognizer().recognize_hand(bgr, hand_roi)
             tenhou_json["hand"] = tiles
             confidence = conf
+
+            # issue #13: 河（捨牌列）認識。手牌側でエラーが出ても河は別系統で
+            # 試行できるよう独立した try でラップする。
+            try:
+                tenhou_json["river"] = _get_river_recognizer().recognize_rivers(
+                    bgr, roi_calib.get("rivers")
+                )
+            except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
+                logger.warning("river recognition failed for id=%s", frame_id, exc_info=True)
     except Exception:  # noqa: BLE001 — recognition プロセスを落とさない
         logger.warning("hand recognition failed for id=%s", frame_id, exc_info=True)
 
@@ -108,6 +125,7 @@ def main() -> int:
     if not args.echo:
         # テンプレロードを起動時に走らせ、不在時の警告を早期に出す。
         _get_recognizer()
+        _get_river_recognizer()
 
     try:
         for req in read_request():
