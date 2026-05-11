@@ -25,6 +25,11 @@ export const REGION_DEFS: readonly RoiRegionDef[] = [
   { id: "river_right", label: "河 (下家)" },
   { id: "river_across", label: "河 (対面)" },
   { id: "river_left", label: "河 (上家)" },
+  // 副露 (issue #14)。加槓の積み牌を捉えるため、ROI は牌 1 段ぶん上に余白を含めて切る。
+  { id: "meld_self", label: "副露 (自家)" },
+  { id: "meld_right", label: "副露 (下家)" },
+  { id: "meld_across", label: "副露 (対面)" },
+  { id: "meld_left", label: "副露 (上家)" },
   { id: "round_info", label: "場況" },
   { id: "self_wind", label: "自風" },
   { id: "scores", label: "点棒" },
@@ -54,6 +59,14 @@ export function getRegionRect(calibration: RoiCalibration, region: RoiRegionId):
       return calibration.rivers.across;
     case "river_left":
       return calibration.rivers.left;
+    case "meld_self":
+      return calibration.melds.self;
+    case "meld_right":
+      return calibration.melds.right;
+    case "meld_across":
+      return calibration.melds.across;
+    case "meld_left":
+      return calibration.melds.left;
   }
 }
 
@@ -89,6 +102,14 @@ export function setRegionRect(
       return { ...calibration, rivers: { ...calibration.rivers, across: rect } };
     case "river_left":
       return { ...calibration, rivers: { ...calibration.rivers, left: rect } };
+    case "meld_self":
+      return { ...calibration, melds: { ...calibration.melds, self: rect } };
+    case "meld_right":
+      return { ...calibration, melds: { ...calibration.melds, right: rect } };
+    case "meld_across":
+      return { ...calibration, melds: { ...calibration.melds, across: rect } };
+    case "meld_left":
+      return { ...calibration, melds: { ...calibration.melds, left: rect } };
   }
 }
 

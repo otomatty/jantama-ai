@@ -43,16 +43,31 @@ export type RoiRegionId =
   | "river_right"
   | "river_across"
   | "river_left"
+  | "meld_self"
+  | "meld_right"
+  | "meld_across"
+  | "meld_left"
   | "round_info"
   | "self_wind"
   | "scores"
   | "turn_counter";
 
-/** ROI キャリブレーション結果 (issue #10 / #12)。未指定領域は `null`。 */
+/** ROI キャリブレーション結果 (issue #10 / #12 / #14)。未指定領域は `null`。 */
 export interface RoiCalibration {
   hand: RoiRect | null;
   doras: RoiRect | null;
   rivers: {
+    self: RoiRect | null;
+    right: RoiRect | null;
+    across: RoiRect | null;
+    left: RoiRect | null;
+  };
+  /**
+   * 4 家分の副露 (鳴き) 領域 (issue #14)。雀魂では自家は手牌の右、他家は
+   * 対応する位置に表示される。加槓の積み牌を捉えるため、ROI は upright 方向の
+   * 1 段ぶん上に余白を含めて切り出すこと。
+   */
+  melds: {
     self: RoiRect | null;
     right: RoiRect | null;
     across: RoiRect | null;
@@ -70,6 +85,7 @@ export const EMPTY_ROI_CALIBRATION: RoiCalibration = {
   hand: null,
   doras: null,
   rivers: { self: null, right: null, across: null, left: null },
+  melds: { self: null, right: null, across: null, left: null },
   round_info: null,
   self_wind: null,
   scores: null,

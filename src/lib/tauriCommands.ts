@@ -67,6 +67,12 @@ function normalizeSettings(raw: AppSettings): AppSettings {
         across: roi.rivers?.across ?? null,
         left: roi.rivers?.left ?? null,
       },
+      melds: {
+        self: roi.melds?.self ?? null,
+        right: roi.melds?.right ?? null,
+        across: roi.melds?.across ?? null,
+        left: roi.melds?.left ?? null,
+      },
       round_info: roi.round_info ?? null,
       self_wind: roi.self_wind ?? null,
       scores: roi.scores ?? null,
