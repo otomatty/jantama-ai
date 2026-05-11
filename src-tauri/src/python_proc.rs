@@ -129,6 +129,20 @@ impl PythonProcess {
         cwd: Option<&Path>,
         log_emitter: Option<PythonLogEmitter>,
     ) -> Result<Self, PythonProcError> {
+        Self::spawn_with_envs(label, program, args, &[], cwd, log_emitter)
+    }
+
+    /// `spawn` に環境変数を追加できる派生。Python 側 CLI が引数だけで表現
+    /// できない設定 (例: `JANTAMA_STUB=1` で stub fallback) を渡すのに使う。
+    /// 既存の `spawn` 呼び出しを書き換えずに済むよう、薄いラッパとして同居させる。
+    pub fn spawn_with_envs(
+        label: impl Into<String>,
+        program: &Path,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        cwd: Option<&Path>,
+        log_emitter: Option<PythonLogEmitter>,
+    ) -> Result<Self, PythonProcError> {
         let label = label.into();
         info!(
             target: "python_proc",
@@ -141,6 +155,7 @@ impl PythonProcess {
         let mut command = Command::new(program);
         command
             .args(args)
+            .envs(envs.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // stderr は専用 reader スレッドで吸い続けるので pipe しても
@@ -381,33 +396,44 @@ impl PythonProcess {
 
     /// mortal プロセスを高レベル API で起動する。
     ///
-    /// `model_path` が空文字列なら `--stub` モードで起動し、それ以外は
-    /// `--model <path>` を渡す。`backend` は将来 Phase D で Python 側の
-    /// モデルロードに反映する想定で、現時点ではコマンド構築には影響しない
-    /// (将来の互換性のため API シグネチャに含めている)。
+    /// `model_path` が空文字列なら `JANTAMA_STUB=1` を環境変数に設定して
+    /// stub モードで起動し、それ以外は `--model <path>` を渡す (issue #18
+    /// で `--stub` フラグが廃止されたため env var 経由でフォールバックする)。
+    /// `backend` は `--backend rocm|cpu` として Python 側に渡し、PyTorch の
+    /// デバイス選択 (ROCm/CUDA か CPU か) に反映される。
     pub fn spawn_mortal<R: Runtime>(
         app: &AppHandle<R>,
         model_path: &str,
         backend: InferenceBackend,
     ) -> Result<Self, PythonProcError> {
-        // Phase D で Python 側 CLI に渡す予定。現状はバックエンドを参照しない。
-        let _ = backend;
         let mut cmd = resolve_python_command(app, "mortal")?;
         // 設定値に前後空白が混ざっても有効なパスとして扱えるよう trim する。
         // trim せずに argparse へ渡すとファイルが見つからないと誤解されがち。
         let model_path = model_path.trim();
+        let mut envs: Vec<(&str, &str)> = Vec::new();
         if model_path.is_empty() {
-            cmd.args.push("--stub".into());
+            // Python 側 (issue #18) は `--stub` を廃止したので env var で
+            // 後方互換のスタブモードに落とす。
+            envs.push(("JANTAMA_STUB", "1"));
         } else {
             cmd.args.push("--model".into());
             cmd.args.push(model_path.to_string());
         }
+        cmd.args.push("--backend".into());
+        cmd.args.push(
+            match backend {
+                InferenceBackend::Rocm => "rocm",
+                InferenceBackend::Cpu => "cpu",
+            }
+            .into(),
+        );
         let arg_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
         let emitter = make_tauri_log_emitter(app);
-        Self::spawn(
+        Self::spawn_with_envs(
             "mortal",
             &cmd.program,
             &arg_refs,
+            &envs,
             cmd.cwd.as_deref(),
             Some(emitter),
         )

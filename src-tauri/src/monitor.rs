@@ -55,7 +55,8 @@ pub enum MonitorError {
 /// は `PythonProcess::spawn_recognition` / `spawn_mortal` 側で吸収する。
 pub struct MonitorConfig {
     pub capture_target: String,
-    /// 空文字列なら mortal を `--stub` モードで起動する。
+    /// 空文字列なら mortal を `JANTAMA_STUB=1` 環境変数経由で stub モード
+    /// 起動する (issue #18 で `--stub` フラグは廃止)。
     pub mortal_model_path: String,
     pub inference_backend: InferenceBackend,
     /// ROI キャリブレーション (issue #10)。recognition プロセスは

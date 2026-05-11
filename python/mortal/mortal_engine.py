@@ -143,12 +143,18 @@ class MortalEngine:
 
         state = self._torch_load(torch, path, device)
 
-        cfg = state.get("config") or {}
-        control = cfg.get("control") or {}
-        resnet = cfg.get("resnet") or {}
-        version = int(control.get("version", 1))
-        num_blocks = int(resnet.get("num_blocks", 40))
-        conv_channels = int(resnet.get("conv_channels", 192))
+        # `state` が想定外の型 (list / Tensor 等) で来たり、`version` 等が
+        # 整数化できない値で保存されていた場合に AttributeError / ValueError
+        # が漏れないよう ModelLoadError にラップする (PR #50 gemini review)。
+        try:
+            cfg = state.get("config") or {}
+            control = cfg.get("control") or {}
+            resnet = cfg.get("resnet") or {}
+            version = int(control.get("version", 1))
+            num_blocks = int(resnet.get("num_blocks", 40))
+            conv_channels = int(resnet.get("conv_channels", 192))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ModelLoadError(f"failed to parse model config: {exc}") from exc
 
         try:
             model_module = importlib.import_module("vendor.mortal.mortal.model")
@@ -185,17 +191,23 @@ class MortalEngine:
             # クラスなので、ここで一括して捕捉してメッセージを付け替える。
             raise ModelLoadError(f"failed to move model to {device}: {exc}") from exc
 
-        self._engine = VendorEngine(
-            brain=brain,
-            dqn=dqn,
-            is_oracle=False,
-            version=version,
-            device=device,
-            enable_amp=False,
-            enable_quick_eval=True,
-            enable_rule_based_agari_guard=True,
-            name=self._name,
-        )
+        # VendorEngine の __init__ で引数不整合 / リソース不足が起きても
+        # ModelLoadError にラップする (PR #50 gemini review)。
+        try:
+            self._engine = VendorEngine(
+                brain=brain,
+                dqn=dqn,
+                is_oracle=False,
+                version=version,
+                device=device,
+                enable_amp=False,
+                enable_quick_eval=True,
+                enable_rule_based_agari_guard=True,
+                name=self._name,
+            )
+        except Exception as exc:
+            raise ModelLoadError(f"failed to construct vendor MortalEngine: {exc}") from exc
+
         self._device = device
         self._version = version
         self._ready = True

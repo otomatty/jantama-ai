@@ -62,7 +62,8 @@ pub async fn start_monitoring(app: AppHandle, state: State<'_, AppState>) -> Res
 
     // dev/release それぞれの起動方式は `PythonProcess::spawn_recognition` /
     // `spawn_mortal` が `resolve_python_command` 経由で吸収する。
-    // ここでは設定値だけ渡す。空文字列なら mortal は `--stub` で起動する。
+    // ここでは設定値だけ渡す。空文字列なら mortal は `JANTAMA_STUB=1` 環境
+    // 変数を設定して stub モードで起動する (issue #18 で `--stub` 廃止)。
     let mortal_model_path = settings.mortal_model_path.clone().unwrap_or_default();
 
     let config = monitor::MonitorConfig {
