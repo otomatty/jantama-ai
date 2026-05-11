@@ -119,6 +119,26 @@ def test_meld_to_dict_returns_fresh_tiles_list() -> None:
     assert m.tiles == ["1z", "1z", "1z", "1z"]  # 元 dataclass は副作用を受けない
 
 
+def test_meld_to_dict_includes_called_index_when_set() -> None:
+    """called_index が設定されている場合は to_dict に含まれる (チー用)。"""
+    m = Meld(player=0, type="chi", tiles=["3m", "4m", "5m"], from_=3, called_index=1)
+    d = m.to_dict()
+    assert d == {
+        "player": 0,
+        "type": "chi",
+        "tiles": ["3m", "4m", "5m"],
+        "from": 3,
+        "called_index": 1,
+    }
+
+
+def test_meld_to_dict_omits_called_index_when_none() -> None:
+    """called_index が None (ポン/ミンカン/アンカン/カカン) では出力に含めない。"""
+    m = Meld(player=2, type="pon", tiles=["5p", "5p", "5p"], from_=1)
+    d = m.to_dict()
+    assert "called_index" not in d
+
+
 # ============================================================================
 # Graceful degradation
 # ============================================================================
@@ -220,7 +240,7 @@ def _build_and_recognize(
 
 
 def test_recognize_chi_from_kamicha(tmp_path: Path) -> None:
-    """連続スーツ 3 牌 + 左横向き → チー、from=3 (上家)。"""
+    """連続スーツ 3 牌 + 左横向き → チー、from=3 (上家)、called_index=0。"""
 
     def layout(c: np.ndarray) -> None:
         x = 4
@@ -235,6 +255,8 @@ def test_recognize_chi_from_kamicha(tmp_path: Path) -> None:
     assert m["from"] == 3
     assert m["tiles"] == ["2m", "3m", "4m"]
     assert m["player"] == 0
+    # called_index は鳴いた牌の位置 (CodeRabbit Critical on PR #51)。
+    assert m["called_index"] == 0
 
 
 def test_recognize_chi_with_middle_horizontal(tmp_path: Path) -> None:
@@ -257,10 +279,11 @@ def test_recognize_chi_with_middle_horizontal(tmp_path: Path) -> None:
     assert m["type"] == "chi"
     assert m["from"] == 3
     assert m["tiles"] == ["4m", "5m", "6m"]
+    assert m["called_index"] == 1
 
 
 def test_recognize_chi_with_right_horizontal(tmp_path: Path) -> None:
-    """連続スーツ 3 牌 + 右横向き (= 最大の牌を鳴いた) → チー、from=3。
+    """連続スーツ 3 牌 + 右横向き (= 最大の牌を鳴いた) → チー、from=3、called_index=2。
 
     7p+8p+9p で 9p を鳴いた場合は右端が横向きになる。
     """
@@ -277,6 +300,7 @@ def test_recognize_chi_with_right_horizontal(tmp_path: Path) -> None:
     assert m["type"] == "chi"
     assert m["from"] == 3
     assert m["tiles"] == ["7p", "8p", "9p"]
+    assert m["called_index"] == 2
 
 
 def test_recognize_pon_from_kamicha(tmp_path: Path) -> None:

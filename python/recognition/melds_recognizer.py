@@ -73,20 +73,28 @@ class Meld:
 
     `tiles` は副露を構成する牌コードのリスト (chi/pon=3, ankan/minkan/kakan=4)。
     `from_` は鳴いた本人から見た相対座順 (0=自家(ankan), 1=下家, 2=対面, 3=上家)。
+    `called_index` は `tiles` 内で鳴いた牌が位置する index (チーの場合のみ意味
+    がある。雀魂は副露牌を昇順表示するため、チーで 4-5-6 と並ぶ中 5 を鳴いた
+    なら called_index=1)。ポン/ミンカンは全牌同種で called_index に意味は無い
+    ため `None` のまま。
     """
 
     player: int
     type: str
     tiles: list[str] = field(default_factory=list)
     from_: int = 0
+    called_index: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "player": self.player,
             "type": self.type,
             "tiles": list(self.tiles),
             "from": self.from_,
         }
+        if self.called_index is not None:
+            d["called_index"] = self.called_index
+        return d
 
 
 @dataclass
@@ -506,8 +514,17 @@ class MeldsRecognizer:
             # ため `from_` は常に 3 (kamicha)。横向きの位置は「どの牌を鳴いたか」
             # (副露牌は昇順表示なので index 0=小, 1=中, 2=大の called tile) を
             # 示すだけで、誰から鳴いたかには影響しない (chatgpt-codex P1 on PR #46)。
+            # mjai event 変換 (Phase D3, issue #19) で「called tile = 鳴いた牌」を
+            # 正しく取り出すために called_index も保持する (CodeRabbit critical on
+            # PR #51): tiles[called_index] が pai、その他 2 牌が consumed。
             if self._is_chi_sequence(tiles):
-                return Meld(player=player_idx, type="chi", tiles=tiles, from_=3)
+                return Meld(
+                    player=player_idx,
+                    type="chi",
+                    tiles=tiles,
+                    from_=3,
+                    called_index=h_indices[0],
+                )
             from_ = self._horizontal_position_to_from(h_indices[0], n)
             if kakan_stack and all_same:
                 # 加槓: 4 枚目はポンと同種なので、横向き牌の code を複製して 4 枚にする。
