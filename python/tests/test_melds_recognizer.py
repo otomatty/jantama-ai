@@ -409,6 +409,56 @@ def test_recognize_multiple_melds_same_player(tmp_path: Path) -> None:
     assert result[1]["tiles"] == ["1m", "2m", "3m"]
 
 
+def test_pon_with_mismatched_tiles_returns_none(tmp_path: Path) -> None:
+    """3 牌 + 左横向き でも全牌が同一でなければ meld を出さない (fail-closed)。
+
+    `["1m", "3m", "5m"]` は同スーツだが連続ではないので chi にもならず、
+    また同一でもないので pon にもしない (coderabbitai Major on PR #46)。
+    """
+
+    def layout(c: np.ndarray) -> None:
+        x = 4
+        x += _draw_horizontal(c, x, "1m")
+        x += _draw_upright(c, x, "3m")
+        x += _draw_upright(c, x, "5m")
+
+    result = _build_and_recognize(tmp_path, layout)
+    assert result == []
+
+
+def test_minkan_with_mismatched_tiles_returns_none(tmp_path: Path) -> None:
+    """4 牌 + 横向き 1 でも全牌が同一でなければ minkan を出さない (fail-closed)。"""
+
+    def layout(c: np.ndarray) -> None:
+        x = 4
+        x += _draw_horizontal(c, x, "1m")
+        x += _draw_upright(c, x, "1m")
+        x += _draw_upright(c, x, "2m")  # 異なる牌種を混ぜる
+        x += _draw_upright(c, x, "1m")
+
+    result = _build_and_recognize(tmp_path, layout)
+    assert result == []
+
+
+def test_low_confidence_horizontal_does_not_break_ankan_detection(tmp_path: Path) -> None:
+    """4 セル裏向きの strip でノイズの「横向き候補」が出ても ankan 判定が
+    優先される (coderabbitai Major on PR #46)。
+
+    `_find_best_horizontal` は ANKAN_NCC_THRESHOLD 未満の候補を採用しないため、
+    全テンプレに対し低 NCC のグループは h_count=0 として ankan branch に流れる。
+    """
+
+    def layout(c: np.ndarray) -> None:
+        x = 4
+        for _ in range(4):
+            x += _draw_facedown(c, x)
+
+    result = _build_and_recognize(tmp_path, layout)
+    assert len(result) == 1
+    assert result[0]["type"] == "ankan"
+    assert result[0]["tiles"] == []
+
+
 def test_chi_vs_pon_disambiguation(tmp_path: Path) -> None:
     """同レイアウト (横向き左端 + 縦 2) で、コードが連続 → chi、同一 → pon に分かれる。"""
 

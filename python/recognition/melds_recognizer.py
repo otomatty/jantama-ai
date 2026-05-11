@@ -289,9 +289,12 @@ class MeldsRecognizer:
         best_h_x, best_h_score, best_h_code = self._find_best_horizontal(
             group, h_up, w_up, h_rot, w_rot
         )
-
+        # 横向き候補は絶対 NCC が ANKAN_NCC_THRESHOLD 以上ある場合のみ採用する
+        # (coderabbitai Major on PR #46)。ガードがないと、4 枚とも裏向き
+        # (ankan 候補) の strip でも、ノイズで「横向きが upright より僅かに高い」
+        # x が偶発的に選ばれ、h_count=1 → minkan 判定で ankan 検出が潰される。
         slots: list[_TileSlot] = []
-        if best_h_x >= 0 and best_h_code is not None:
+        if best_h_x >= 0 and best_h_code is not None and best_h_score >= ANKAN_NCC_THRESHOLD:
             left_slots = self._segment_upright_run(group, 0, best_h_x)
             right_slots = self._segment_upright_run(group, best_h_x + w_rot, gw)
             slots.extend(left_slots)
@@ -466,11 +469,18 @@ class MeldsRecognizer:
     def _classify_meld(
         self, slots: list[_TileSlot], kakan_stack: bool, player_idx: int
     ) -> Meld | None:
-        """(枚数, 横向き枚数, 横向き位置, スタック有無) で副露種別を決める。"""
+        """(枚数, 横向き枚数, 横向き位置, スタック有無) で副露種別を決める。
+
+        pon / minkan / kakan は「全 3 (or 4) 牌が同一」が必須条件 (麻雀ルール)。
+        誤認識で 1 枚でも異なると `["1m","1m","2m"]` のような不正 meld を
+        tenhou_json に出して downstream の状態を壊すため、同一でなければ
+        None を返して該当グループを無視する (coderabbitai Major on PR #46)。
+        """
         n = len(slots)
         h_indices = [i for i, s in enumerate(slots) if s.is_horizontal]
         h_count = len(h_indices)
         tiles = [s.code for s in slots]
+        all_same = bool(tiles) and len(set(tiles)) == 1
 
         if n == 4:
             if h_count == 0:
@@ -483,7 +493,7 @@ class MeldsRecognizer:
                     # 検出する追補と裏向き専用テンプレ整備は #16 follow-up。
                     return Meld(player=player_idx, type="ankan", tiles=[], from_=0)
                 return None
-            if h_count == 1:
+            if h_count == 1 and all_same:
                 from_ = self._horizontal_position_to_from(h_indices[0], n)
                 return Meld(player=player_idx, type="minkan", tiles=tiles, from_=from_)
             return None
@@ -492,17 +502,17 @@ class MeldsRecognizer:
             if h_count != 1:
                 return None
             from_ = self._horizontal_position_to_from(h_indices[0], n)
-            if kakan_stack:
+            if kakan_stack and all_same:
                 # 加槓: 4 枚目はポンと同種なので、横向き牌の code を複製して 4 枚にする。
                 tiles_with_stack = list(tiles)
                 tiles_with_stack.append(slots[h_indices[0]].code)
                 return Meld(player=player_idx, type="kakan", tiles=tiles_with_stack, from_=from_)
             # チー判定は「横向きが左端 (= 上家由来) かつ 3 牌が同一スーツの連続数」のとき。
-            # それ以外は同一 3 牌のポンとして扱う。誤分類は upstream のセグメント
-            # 失敗が原因で起きうるため、明示的にチー条件を満たさないものは pon に倒す。
             if from_ == 3 and self._is_chi_sequence(tiles):
                 return Meld(player=player_idx, type="chi", tiles=tiles, from_=3)
-            return Meld(player=player_idx, type="pon", tiles=tiles, from_=from_)
+            if all_same:
+                return Meld(player=player_idx, type="pon", tiles=tiles, from_=from_)
+            return None
 
         return None
 
