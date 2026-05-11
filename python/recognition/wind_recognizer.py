@@ -16,7 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from recognition.tile_recognizer import RoiRect
+from recognition.tile_recognizer import RoiRect, crop_roi_to_gray, fit_to_template_size
 
 logger = logging.getLogger("recognition")
 
@@ -109,24 +109,12 @@ class WindRecognizer:
                 )
                 self._warned_no_roi = True
             return None, 0.0
-        if bgr_frame is None or bgr_frame.size == 0:
+        gray = crop_roi_to_gray(bgr_frame, wind_roi)
+        if gray is None:
             return None, 0.0
-
-        h, w = bgr_frame.shape[:2]
-        x0 = max(0, min(w, int(wind_roi.x * w)))
-        y0 = max(0, min(h, int(wind_roi.y * h)))
-        x1 = max(0, min(w, int((wind_roi.x + wind_roi.w) * w)))
-        y1 = max(0, min(h, int((wind_roi.y + wind_roi.h) * h)))
-        if x1 <= x0 or y1 <= y0:
-            return None, 0.0
-
-        crop = bgr_frame[y0:y1, x0:x1]
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
         assert self._tmpl_size is not None
-        th, tw = self._tmpl_size
-        if gray.shape != (th, tw):
-            gray = cv2.resize(gray, (tw, th))
+        gray = fit_to_template_size(gray, self._tmpl_size)
 
         best_key: str | None = None
         best_score = -1.0

@@ -35,6 +35,8 @@ import numpy as np
 from recognition.tile_recognizer import (
     BLANK_STD_THRESHOLD,
     RoiRect,
+    crop_roi_to_gray,
+    fit_to_template_size,
     load_tile_templates,
 )
 
@@ -144,7 +146,6 @@ class RiverRecognizer:
 
         rois = _extract_river_rois(river_rois)
         result: list[dict[str, Any]] = []
-        h, w = bgr_frame.shape[:2]
         for player_idx, key in enumerate(RIVER_PLAYER_KEYS):
             roi = rois[key]
             if roi is None:
@@ -157,7 +158,7 @@ class RiverRecognizer:
                     )
                     self._warned_no_roi.add(key)
                 continue
-            tiles = self._recognize_player(bgr_frame, roi, player_idx, (h, w))
+            tiles = self._recognize_player(bgr_frame, roi, player_idx)
             result.extend(t.to_dict() for t in tiles)
         return result
 
@@ -166,28 +167,22 @@ class RiverRecognizer:
         bgr: np.ndarray,
         roi: RoiRect,
         player_idx: int,
-        frame_size: tuple[int, int],
     ) -> list[RiverTile]:
-        h, w = frame_size
-        x0 = max(0, min(w, int(roi.x * w)))
-        y0 = max(0, min(h, int(roi.y * h)))
-        x1 = max(0, min(w, int((roi.x + roi.w) * w)))
-        y1 = max(0, min(h, int((roi.y + roi.h) * h)))
-        if x1 - x0 < RIVER_COLS or y1 - y0 < RIVER_ROWS:
+        gray = crop_roi_to_gray(bgr, roi, min_w=RIVER_COLS, min_h=RIVER_ROWS)
+        if gray is None:
             return []
-
-        crop = bgr[y0:y1, x0:x1]
         # 雀魂 UI では他家の河が画面上で回転して描画される (右家=90° CW,
         # 対面=180°, 左家=90° CCW)。crop をプレイヤーごとに逆回転で正規化
         # して「縦向き = upright」に揃え、6 列 × 4 段の grid 分割と縦向き
         # テンプレマッチを 4 家で共通に扱う (gemini-code-assist High)。
+        # cv2.rotate は純粋なピクセル並び替えなのでグレースケール変換後でも
+        # BGR 上で回転した場合と等価。
         if player_idx == 1:  # 下家 (right): 画面 90° CW → CCW で戻す
-            crop = cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            gray = cv2.rotate(gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
         elif player_idx == 2:  # 対面 (across): 画面 180° → 180° で戻す
-            crop = cv2.rotate(crop, cv2.ROTATE_180)
+            gray = cv2.rotate(gray, cv2.ROTATE_180)
         elif player_idx == 3:  # 上家 (left): 画面 90° CCW → CW で戻す
-            crop = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            gray = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
         ch, cw = gray.shape[:2]
 
         tiles: list[RiverTile] = []
@@ -236,8 +231,7 @@ class RiverRecognizer:
     ) -> tuple[str | None, float]:
         if tmpl_size is None or not templates:
             return None, -1.0
-        th, tw = tmpl_size
-        cell_resized = cv2.resize(cell_gray, (tw, th)) if cell_gray.shape != (th, tw) else cell_gray
+        cell_resized = fit_to_template_size(cell_gray, tmpl_size)
         best_code: str | None = None
         best_score = -1.0
         for code, tmpl in templates.items():
