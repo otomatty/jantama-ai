@@ -283,40 +283,12 @@ class MeldsRecognizer:
         if gh < h_rot or gw < w_up:
             return []
 
-        # 横向き牌は strip の最下段に貼り付く。
-        bottom_y0 = gh - h_rot
-        best_h_x = -1
-        best_h_score = -1.0
-        best_h_code: str | None = None
-        for x in range(0, gw - w_rot + 1):
-            cell_h = group[bottom_y0:gh, x : x + w_rot]
-            if cell_h.size == 0 or float(cell_h.std()) < BLANK_STD_THRESHOLD:
-                continue
-            ccw_code, ccw_score = self._match_at_size(
-                cell_h, self._templates_rotated_ccw, self._size_rotated
-            )
-            cw_code, cw_score = self._match_at_size(
-                cell_h, self._templates_rotated_cw, self._size_rotated
-            )
-            if ccw_score >= cw_score:
-                rot_code, rot_score = ccw_code, ccw_score
-            else:
-                rot_code, rot_score = cw_code, cw_score
-            # 同じ x 起点で「もし upright 牌だったら」のスコアを比較。
-            # 横向きと upright で幅が違うため厳密な比較ではないが、
-            # 「upright として高スコアなら横向き候補ではない」を弾くには十分。
-            up_y0 = max(0, gh - h_up)
-            cell_up = group[up_y0:gh, x : x + w_up]
-            if cell_up.size > 0:
-                _, up_score = self._match_at_size(
-                    cell_up, self._templates_upright, self._size_upright
-                )
-            else:
-                up_score = -1.0
-            if rot_score > up_score + HORIZONTAL_SCORE_MARGIN and rot_score > best_h_score:
-                best_h_score = rot_score
-                best_h_x = x
-                best_h_code = rot_code
+        # 横向きスロットを strip 全幅に対して 1 度だけ NCC スキャンして特定する
+        # (gemini-code-assist Medium on PR #46): 元実装の x×37×2 個別呼び出しを
+        # 37×2 個の cv2.matchTemplate に置換 (各 call が strip 全幅の score map を返す)。
+        best_h_x, best_h_score, best_h_code = self._find_best_horizontal(
+            group, h_up, w_up, h_rot, w_rot
+        )
 
         slots: list[_TileSlot] = []
         if best_h_x >= 0 and best_h_code is not None:
@@ -338,8 +310,76 @@ class MeldsRecognizer:
             slots = self._segment_upright_run(group, 0, gw)
         return slots
 
+    def _find_best_horizontal(
+        self,
+        group: np.ndarray,
+        h_up: int,
+        w_up: int,
+        h_rot: int,
+        w_rot: int,
+    ) -> tuple[int, float, str | None]:
+        """horizontal slot を 1 つだけ特定し `(x, score, code)` を返す。
+
+        テンプレ 1 つにつき `cv2.matchTemplate` 1 回で strip 全幅の score map を
+        取り、x ごとの最大値テーブルを構築する。元実装の per-x ループ + per-call
+        cell resize を排して、長い strip でも O(templates) 回で済むようにする
+        (gemini-code-assist Medium)。
+
+        upright としても高スコアになる x は除外する (元実装と同じ「横向き優位」
+        判定)。一致なしなら `(-1, -inf, None)`。
+        """
+        gh, gw = group.shape
+        n_x_h = gw - w_rot + 1
+        if n_x_h <= 0:
+            return -1, float("-inf"), None
+
+        # 横向きテンプレ (CCW + CW) で strip 最下段の score map を構築する。
+        bottom_strip = group[gh - h_rot : gh, :]
+        h_max_scores = np.full(n_x_h, -np.inf, dtype=np.float64)
+        h_max_codes: list[str | None] = [None] * n_x_h
+        for templates in (self._templates_rotated_ccw, self._templates_rotated_cw):
+            for code, tmpl in templates.items():
+                res = cv2.matchTemplate(bottom_strip, tmpl, cv2.TM_CCOEFF_NORMED)
+                scores = res[0]  # shape (n_x_h,)
+                improved = scores > h_max_scores
+                if not improved.any():
+                    continue
+                h_max_scores = np.where(improved, scores, h_max_scores)
+                for idx in np.flatnonzero(improved):
+                    h_max_codes[int(idx)] = code
+
+        # 同じ x 起点で「もし upright 牌だったら」の score map も 1 度ずつ取る。
+        # upright と horizontal で幅 (w_up vs w_rot) が違うため n_x_up > n_x_h だが、
+        # 比較は x ∈ [0, n_x_h) のみで行う (x_h と x_up を「左端を揃えて比較」)。
+        upright_strip = group[max(0, gh - h_up) : gh, :]
+        n_x_up = max(0, gw - w_up + 1)
+        up_max_scores = np.full(n_x_up, -np.inf, dtype=np.float64)
+        if upright_strip.shape[0] >= h_up and n_x_up > 0:
+            for tmpl in self._templates_upright.values():
+                res = cv2.matchTemplate(upright_strip, tmpl, cv2.TM_CCOEFF_NORMED)
+                up_max_scores = np.maximum(up_max_scores, res[0])
+
+        best_x = -1
+        best_score = float("-inf")
+        best_code: str | None = None
+        for x in range(n_x_h):
+            h_score = h_max_scores[x]
+            if not np.isfinite(h_score):
+                continue
+            up_score = up_max_scores[x] if x < n_x_up else -np.inf
+            if h_score > up_score + HORIZONTAL_SCORE_MARGIN and h_score > best_score:
+                best_score = float(h_score)
+                best_x = x
+                best_code = h_max_codes[x]
+        return best_x, best_score, best_code
+
     def _segment_upright_run(self, group: np.ndarray, x0: int, x1: int) -> list[_TileSlot]:
-        """指定範囲 [x0, x1) を upright 牌幅で等分してマッチする。"""
+        """指定範囲 [x0, x1) を upright 牌幅で等分してマッチする。
+
+        テンプレ 1 つにつき `cv2.matchTemplate` 1 回で run 全幅の score map を取り、
+        固定スロット位置 (`local_x = i * w_up`) の列を抜き出して各スロットの
+        最良コードを決める (gemini-code-assist Medium on PR #46)。
+        """
         if self._size_upright is None:
             return []
         h_up, w_up = self._size_upright
@@ -350,22 +390,40 @@ class MeldsRecognizer:
         n = run_w // w_up
         if n == 0:
             return []
-        # upright 牌は strip 全高 H を占め、最下段に揃う。
         y0 = max(0, gh - h_up)
+        upright_strip = group[y0:gh, x0:x1]
+        if upright_strip.shape[0] < h_up:
+            return []
+        n_x = upright_strip.shape[1] - w_up + 1
+        if n_x <= 0:
+            return []
+
+        # 全テンプレの score map を (37, n_x) 行列にまとめ、列ごとの argmax を取る。
+        codes = list(self._templates_upright.keys())
+        score_map = np.empty((len(codes), n_x), dtype=np.float64)
+        for i, code in enumerate(codes):
+            res = cv2.matchTemplate(
+                upright_strip, self._templates_upright[code], cv2.TM_CCOEFF_NORMED
+            )
+            score_map[i] = res[0]
+
         slots: list[_TileSlot] = []
         for i in range(n):
             sx = x0 + i * w_up
             ex = x1 if i == n - 1 else x0 + (i + 1) * w_up
-            cell = group[y0:gh, sx:ex]
+            local_x = i * w_up
+            if local_x >= n_x:
+                continue
+            # 空白セルはスキップ (= 鳴かれた牌の隙間や帯端のはみ出し)。
+            cell = upright_strip[:, local_x : local_x + w_up]
             if cell.size == 0 or float(cell.std()) < BLANK_STD_THRESHOLD:
                 continue
-            code, score = self._match_at_size(cell, self._templates_upright, self._size_upright)
-            if code is None:
-                continue
+            scores_at_x = score_map[:, local_x]
+            best_idx = int(np.argmax(scores_at_x))
             slots.append(
                 _TileSlot(
-                    code=code,
-                    score=score,
+                    code=codes[best_idx],
+                    score=float(scores_at_x[best_idx]),
                     is_horizontal=False,
                     x_in_group=sx,
                     width=ex - sx,
@@ -419,7 +477,11 @@ class MeldsRecognizer:
                 # 4 枚すべて表牌スコアが低ければ ankan (= 全て裏向き)。
                 max_score = max(s.score for s in slots) if slots else -1.0
                 if max_score < ANKAN_NCC_THRESHOLD:
-                    return Meld(player=player_idx, type="ankan", tiles=tiles, from_=0)
+                    # 裏向き牌からは具体的な牌種を識別できないため `tiles` は空にする。
+                    # ランダム低スコアの best-effort code を 4 つ並べると Mortal を惑わす
+                    # (gemini-code-assist High on PR #46)。自家 ankan のみ face-up
+                    # 検出する追補と裏向き専用テンプレ整備は #16 follow-up。
+                    return Meld(player=player_idx, type="ankan", tiles=[], from_=0)
                 return None
             if h_count == 1:
                 from_ = self._horizontal_position_to_from(h_indices[0], n)

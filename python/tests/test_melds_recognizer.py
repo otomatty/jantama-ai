@@ -313,7 +313,12 @@ def test_recognize_minkan_from_various_sources(
 
 
 def test_recognize_ankan(tmp_path: Path) -> None:
-    """4 セルすべて裏向き (低 NCC) → 暗槓、from=0。"""
+    """4 セルすべて裏向き (低 NCC) → 暗槓、from=0。
+
+    `tiles` は空 list で返る: 裏向き牌からは具体的な牌種を識別できないため、
+    ランダム低スコアの best-effort code を出力すると Mortal を惑わす
+    (gemini-code-assist High on PR #46)。
+    """
 
     def layout(c: np.ndarray) -> None:
         x = 4
@@ -325,7 +330,7 @@ def test_recognize_ankan(tmp_path: Path) -> None:
     m = result[0]
     assert m["type"] == "ankan"
     assert m["from"] == 0
-    assert len(m["tiles"]) == 4
+    assert m["tiles"] == []
 
 
 def test_ankan_threshold_constant_consistency() -> None:
