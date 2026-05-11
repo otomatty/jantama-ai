@@ -50,6 +50,63 @@ HAND_SLOTS = 14
 DORA_SLOTS = 5
 
 
+def load_tile_templates(
+    template_dir: Path,
+) -> tuple[dict[str, np.ndarray], tuple[int, int]] | None:
+    """`template_dir` から 37 種のグレースケールテンプレを読み込んで返す。
+
+    全種揃わない場合は `None`。「部分セット」はマッチング結果を歪めるため
+    fail-closed にする (Codex P2 on PR #43)。サイズが不揃いな場合は最初に
+    読み込めたテンプレのサイズに resize して揃える。
+
+    戻り値: `(templates, (h, w))` または `None`。
+    """
+    if not template_dir.is_dir():
+        logger.warning(
+            "tile templates dir not found: %s (issue #16 で配置予定)",
+            template_dir,
+        )
+        return None
+
+    loaded: dict[str, np.ndarray] = {}
+    first_size: tuple[int, int] | None = None
+    for code in TILE_CODES:
+        path = template_dir / f"{code}.png"
+        if not path.is_file():
+            continue
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            logger.warning("failed to read template: %s", path)
+            continue
+        if first_size is None:
+            first_size = img.shape[:2]
+        elif img.shape[:2] != first_size:
+            img = cv2.resize(img, (first_size[1], first_size[0]))
+        loaded[code] = img
+
+    if not loaded or first_size is None:
+        logger.warning(
+            "no tile templates loaded from %s (issue #16)",
+            template_dir,
+        )
+        return None
+
+    missing = [code for code in TILE_CODES if code not in loaded]
+    if missing:
+        logger.warning(
+            "partial tile template set in %s: missing %d/%d (%s); "
+            "recognizers disabled until all templates are present",
+            template_dir,
+            len(missing),
+            len(TILE_CODES),
+            ", ".join(missing),
+        )
+        return None
+
+    logger.info("loaded %d tile templates from %s", len(loaded), template_dir)
+    return loaded, first_size
+
+
 @dataclass(frozen=True)
 class RoiRect:
     """正規化済み ROI 矩形。フィールド名は src-tauri/src/types.rs の RoiRect と同じ。"""
@@ -82,55 +139,11 @@ class TileRecognizer:
         self._load()
 
     def _load(self) -> None:
-        if not self.template_dir.is_dir():
-            logger.warning(
-                "tile templates dir not found: %s (issue #16 で配置予定)",
-                self.template_dir,
-            )
+        result = load_tile_templates(self.template_dir)
+        if result is None:
             return
-
-        loaded: dict[str, np.ndarray] = {}
-        first_size: tuple[int, int] | None = None
-        for code in TILE_CODES:
-            path = self.template_dir / f"{code}.png"
-            if not path.is_file():
-                continue
-            img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                logger.warning("failed to read template: %s", path)
-                continue
-            if first_size is None:
-                first_size = img.shape[:2]
-            elif img.shape[:2] != first_size:
-                img = cv2.resize(img, (first_size[1], first_size[0]))
-            loaded[code] = img
-
-        if not loaded:
-            logger.warning(
-                "no tile templates loaded from %s; recognize_hand will return empty (issue #16)",
-                self.template_dir,
-            )
-            return
-
-        # 部分セットでマッチングを走らせると「欠けた牌種」のセグメントが必ず
-        # 残った牌に誤分類される (Codex P2 on PR #43)。安全側に倒し、37 種
-        # 全部揃わないと recognize_hand を有効化しない。
-        missing = [code for code in TILE_CODES if code not in loaded]
-        if missing:
-            logger.warning(
-                "partial tile template set in %s: missing %d/%d (%s); "
-                "recognize_hand disabled until all templates are present",
-                self.template_dir,
-                len(missing),
-                len(TILE_CODES),
-                ", ".join(missing),
-            )
-            return
-
-        self._templates = loaded
-        self._tmpl_size = first_size
+        self._templates, self._tmpl_size = result
         self._loaded = True
-        logger.info("loaded %d tile templates from %s", len(loaded), self.template_dir)
 
     def recognize_hand(
         self,
