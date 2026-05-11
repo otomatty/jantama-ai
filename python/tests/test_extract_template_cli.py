@@ -8,10 +8,11 @@ main の except では捕捉できないため、入力時点で弾く)。
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import pytest
 
-from recognition.tools.extract_template import _parse_size
+from recognition.tools.extract_template import _DEFAULT_OUT_DIR, _parse_size
 
 
 def test_parse_size_accepts_positive_dimensions() -> None:
@@ -29,3 +30,17 @@ def test_parse_size_rejects_malformed() -> None:
     for spec in ("64", "64x", "xx", "abc", "64x96x32"):
         with pytest.raises(argparse.ArgumentTypeError, match="invalid --size"):
             _parse_size(spec)
+
+
+def test_default_out_dir_is_recognition_templates_regardless_of_cwd() -> None:
+    """`--out` のデフォルトは cwd 非依存で `recognition/templates` を指す。
+
+    Codex P2 on PR #48: 既定パスが相対だと `cd python` 後に
+    `python/python/recognition/templates` に書かれてサイレントに recognition.main
+    が読む場所からズレる。`__file__` 起点で絶対パス化することで防ぐ。
+    """
+    assert _DEFAULT_OUT_DIR.is_absolute()
+    # ソース位置: python/recognition/tools/extract_template.py
+    # 期待デフォルト: python/recognition/templates/
+    expected = Path(__file__).resolve().parent.parent / "recognition" / "templates"
+    assert expected == _DEFAULT_OUT_DIR

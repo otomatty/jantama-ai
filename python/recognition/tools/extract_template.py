@@ -34,6 +34,13 @@ logger = logging.getLogger("recognition.tools.extract_template")
 
 WIND_KEYS: tuple[str, ...] = ("east", "south", "west", "north")
 
+# CLI 既定の保存先。cwd が「リポジトリルート」でも「python/」でも同じ
+# `recognition/templates/` を指すよう、ソース位置からの相対で解決する
+# (Codex P2 on PR #48)。これが無いと cd python 後の起動で
+# `python/python/recognition/templates` に書かれて recognition.main が
+# 読むディレクトリ外に保存され、fail-closed のままになる。
+_DEFAULT_OUT_DIR: Path = Path(__file__).resolve().parent.parent / "templates"
+
 
 def _valid_codes() -> set[str]:
     """切り出し先として受け付けるコードの全集合。"""
@@ -116,8 +123,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("python/recognition/templates"),
-        help="書き出し先のテンプレートディレクトリ (デフォルト: python/recognition/templates)",
+        default=_DEFAULT_OUT_DIR,
+        help=(
+            "書き出し先のテンプレートディレクトリ (デフォルト: ソース位置基準の "
+            "recognition/templates、cwd 非依存)"
+        ),
     )
     parser.add_argument(
         "--size",
