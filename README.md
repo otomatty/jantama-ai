@@ -56,12 +56,17 @@ jantama-ai/
 # 1. フロント依存
 npm install
 
-# 2. Python 依存 (uv)
+# 2. submodule (Mortal vendor) を取得
+git submodule update --init --recursive
+
+# 3. Python 依存 (uv)
 cd python
 uv sync --extra dev
+# Mortal 推論用ランタイムも揃える場合
+uv sync --extra mortal
 cd ..
 
-# 3. Mortal モデルを別途取得 (PRD §10 Phase B 以降で必要)
+# 4. Mortal モデルを別途取得 (PRD §10 Phase B 以降で必要)
 #    https://github.com/Equim-chan/Mortal から学習済みモデルを入手して
 #    任意の場所に配置し、設定画面でパスを指定する。
 ```
@@ -104,3 +109,16 @@ npm run tauri:build
 - 個人利用に限ります。Mortal モデルは配布しません。
 - 雀魂のメモリ・通信は一切読まず、画面キャプチャのみで動作します。
 - 自動操作 (ボット化) は行いません。
+
+### サードパーティライセンス
+
+- `python/vendor/mortal/` には [Equim-chan/Mortal](https://github.com/Equim-chan/Mortal)
+  を git submodule として取り込んでいます。本体のライセンスは
+  **AGPL-3.0** (`python/vendor/mortal/LICENSE`) です。
+- PRD §10 のリスク対応に従い、**Mortal 本体および学習済みモデルの再配布は行いません**。
+  本リポジトリのビルド成果物 (.exe / インストーラ) に Mortal のソースや
+  モデルファイルを同梱しないでください。利用者自身で submodule を取得し、
+  モデルファイルを手元に配置する運用とします。
+- AGPL-3.0 のコピーレフト条項の影響は `python/vendor/mortal/` 配下のコードに
+  限定されます。本リポジトリの他のコード (Tauri / React / 認識処理 / Mortal
+  プロセススケルトン) は別ライセンスのままです。

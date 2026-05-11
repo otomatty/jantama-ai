@@ -19,8 +19,15 @@ dependencies = [
 [project.optional-dependencies]
 # Mortal 推論で必要。ROCm 7.2.1 を使う場合は別途インデックス指定でインストール。
 # 例: uv pip install --extra-index-url https://download.pytorch.org/whl/rocm7.2 torch
+#
+# 上流 Mortal (python/vendor/mortal) の environment.yml に記載された pip 依存を
+# ここで一括管理する。libriichi は Mortal 本体側で Rust から build する必要があり
+# pip からは取得できない (Phase D2 で対応)。
 mortal = [
     "torch>=2.4; sys_platform != 'win32' or platform_machine != 'AMD64'",
+    "toml>=0.10",
+    "tqdm>=4.66",
+    "tensorboard>=2.16",
 ]
 dev = [
     "ruff>=0.6",
@@ -44,6 +51,8 @@ packages = ["recognition", "mortal", "common"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# vendor/ は Equim-chan/Mortal の git submodule。本リポジトリ側で lint しない。
+extend-exclude = ["vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "W", "UP", "N", "SIM"]

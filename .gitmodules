@@ -1,0 +1,3 @@
+[submodule "python/vendor/mortal"]
+	path = python/vendor/mortal
+	url = https://github.com/Equim-chan/Mortal.git
