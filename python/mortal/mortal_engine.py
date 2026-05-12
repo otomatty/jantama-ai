@@ -2,8 +2,11 @@
 
 `torch.load` で `.pth` を読み込み、vendor Mortal の `Brain` / `DQN` を
 構築して state_dict をロードする。推論は vendor 側 `MortalEngine.react_batch`
-にデリゲートする想定だが、`tenhou_json -> obs/mask` 変換は Phase D3/D4
-で実装するため本クラスからは現状スタブ応答を返す。
+にデリゲートする想定だが、libriichi `mjai.Bot` ↔ vendor `react_batch`
+の配線は Phase D5 (後続 issue) に分離する。本クラスの `infer()` は
+スタブモードでは `action_formatter.format_inference_result()` を経由した
+整形済みレスポンスを返し、リアルモードでは `_infer_real()` で
+`NotImplementedError` を上げて後続実装に明示的に委譲する。
 
 vendor submodule (`python/vendor/mortal/`) が未取得、または `torch`
 ([mortal] extras) が未インストールの環境では `ModelLoadError` を送出する。
@@ -17,9 +20,10 @@ from __future__ import annotations
 import importlib
 import logging
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from mortal.action_formatter import format_inference_result
 
 logger = logging.getLogger("mortal.engine")
 
@@ -33,19 +37,41 @@ class ModelLoadError(RuntimeError):
     """
 
 
-_STUB_CANDIDATES: list[dict[str, Any]] = [
-    {"tile": "6m", "action_type": "discard", "expected_value": 0.32},
-    {"tile": "9p", "action_type": "discard", "expected_value": 0.18},
-    {"tile": "1z", "action_type": "discard", "expected_value": -0.05},
-]
+# スタブモード用の合成 policy/value/q_values。`infer()` が
+# `action_formatter.format_inference_result` を通すための入力で、
+# - discard 4 種 + reach + pon の 6 アクションを含む (top-5 抽出と
+#   action_type マッピングが網羅的に検証できる最小セット)
+# - policy 合計はおおむね 1.0 に揃える (現実の softmax 出力に近い形)
+_STUB_POLICY: dict[str, float] = {
+    "discard:1m": 0.05,
+    "discard:6m": 0.61,
+    "discard:9p": 0.18,
+    "discard:1z": 0.04,
+    "reach": 0.10,
+    "pon:5m5m": 0.02,
+}
+_STUB_Q_VALUES: dict[str, float] = {
+    "discard:1m": -0.10,
+    "discard:6m": 0.32,
+    "discard:9p": 0.18,
+    "discard:1z": -0.05,
+    "reach": 0.40,
+    "pon:5m5m": -0.20,
+}
+_STUB_VALUE: float = 0.32
 
 
 def _stub_result() -> dict[str, Any]:
-    return {
-        "recommended": _STUB_CANDIDATES[0],
-        "candidates": list(_STUB_CANDIDATES),
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
+    """スタブモード時の整形済みレスポンスを返す。
+
+    本実装も同じ `format_inference_result` を経由するため、
+    shape は完全に互換となる。
+    """
+    return format_inference_result(
+        policy=_STUB_POLICY,
+        value=_STUB_VALUE,
+        q_values=_STUB_Q_VALUES,
+    )
 
 
 def _resolve_device(torch: Any, backend: str) -> Any:
@@ -261,15 +287,45 @@ class MortalEngine:
     def version(self) -> int | None:
         return self._version
 
-    def infer(self, tenhou_json: dict[str, Any]) -> dict[str, Any]:
-        """`tenhou_json` から推奨アクションを返す。
+    def infer(self, mjai_events: list[dict[str, Any]]) -> dict[str, Any]:
+        """mjai event 列から推奨アクションを返す。
 
-        Phase D3/D4 で `tenhou_json -> obs/mask` 変換 + `react_batch`
-        呼び出しを実装する。それまではモデルがロード済みでもスタブ応答を返す
-        (recommended / candidates / timestamp の形状は本実装と互換)。
+        スタブモードでは引数を無視して合成 policy を `action_formatter` に
+        通した整形済みレスポンスを返す。実モデルが load 済みの場合は
+        `_infer_real(mjai_events)` を呼ぶが、libriichi `mjai.Bot` への
+        配線は Phase D5 (後続 issue) で実装するため現状は
+        `NotImplementedError` を上げる。
+
+        返値の shape は frontend `InferenceResult` 型 (`src/types/index.ts`)
+        と互換: `recommended`, `candidates`, `primary_label`, `timestamp` を
+        必ず含み、デバッグ用に raw `policy` / `value` / `q_values` も同梱する。
         """
         if not self._ready:
             raise RuntimeError("MortalEngine is not ready; call load() first")
-        # 引数は将来の変換実装で使う。現状はスタブのため未使用。
-        del tenhou_json
-        return _stub_result()
+        if self._stub:
+            del mjai_events
+            return _stub_result()
+        return self._infer_real(mjai_events)
+
+    def _infer_real(self, mjai_events: list[dict[str, Any]]) -> dict[str, Any]:
+        """vendor `MortalEngine.react_batch` への配線 (Phase D5)。
+
+        実装ステップ (後続 issue):
+        1. libriichi の `mjai.Bot` を `oya`/`bakaze`/`kyoku` 等で初期化し、
+           受け取った mjai_events を 1 件ずつ feed して内部状態を構築。
+        2. Bot から `(obs, mask)` を取り出し `self._engine.react_batch` に渡す。
+        3. 返ってきた logits / Q values から `policy` (softmax)、`q_values`、
+           `value` を抽出。
+        4. `action_formatter.format_inference_result()` に渡して整形して返す。
+
+        現時点で配線できない理由: vendor submodule
+        (`python/vendor/mortal/`) が CI 環境では未初期化のため、
+        `react_batch` の正確な戻り値型を検証する手段がない。明示的に
+        `NotImplementedError` を上げ、フォールバックで黙ってスタブを返す
+        ことは避ける (本番でユーザに気付かれない劣化が起きるため)。
+        """
+        del mjai_events
+        raise NotImplementedError(
+            "Phase D5: vendor.mortal.engine.MortalEngine.react_batch wiring "
+            "is not yet implemented; pass JANTAMA_STUB=1 for stub responses"
+        )

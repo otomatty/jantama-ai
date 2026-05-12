@@ -34,20 +34,37 @@ def test_stub_engine_is_ready() -> None:
 
 
 def test_stub_engine_infer_shape() -> None:
+    """issue #20 受け入れ基準: スタブで dummy mjai event → candidates 5 件 + primary_label。"""
     engine = MortalEngine.stub()
-    result = engine.infer({})
+    result = engine.infer([{"type": "tsumo", "actor": 0, "pai": "5m"}])
+    # InferenceResult TS 型 (src/types/index.ts:187) 必須キー。
     assert "recommended" in result
     assert "candidates" in result
     assert "timestamp" in result
+    assert "primary_label" in result
+    # 整形ロジック (action_formatter.format_inference_result) の挙動を検証。
     assert isinstance(result["candidates"], list)
-    assert result["recommended"]["action_type"] == "discard"
+    assert len(result["candidates"]) == 5
+    rec = result["recommended"]
+    assert rec["action_type"] == "discard"
+    assert rec["tile"] == "6m"
+    assert result["primary_label"] == "6m を切る"
+    # 各 candidate に probability / expected_value が付与される。
+    for c in result["candidates"]:
+        assert "action_type" in c
+        assert "probability" in c
+        assert "expected_value" in c
+    # raw policy/value/q_values (デバッグ用) も同梱されている。
+    assert "policy" in result
+    assert "value" in result
+    assert "q_values" in result
 
 
 def test_engine_default_not_ready() -> None:
     engine = MortalEngine()
     assert engine.is_ready() is False
     with pytest.raises(RuntimeError, match="not ready"):
-        engine.infer({})
+        engine.infer([])
 
 
 def test_from_pretrained_missing_file_raises(tmp_path: Path) -> None:
