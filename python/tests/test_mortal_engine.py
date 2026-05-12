@@ -4,20 +4,27 @@ vendor submodule / torch は重い依存なので、本テストは
 - スタブモード (依存ゼロ)
 - ファイル不在エラー (依存ゼロ)
 - 不正ファイルでの ModelLoadError (torch がある場合のみ)
+- CUDA RuntimeError → CPU フォールバック (issue #21, torch 不要 / MagicMock)
 の観点で確認する。
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import importlib.util
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 import mortal  # noqa: F401 — sys.path 調整副作用
 from mortal.main import _build_engine
-from mortal.mortal_engine import ModelLoadError, MortalEngine
+from mortal.mortal_engine import (
+    ModelLoadError,
+    MortalEngine,
+    _is_cuda_runtime_error,
+)
 
 
 def _make_args(*, model: str | None, backend: str) -> argparse.Namespace:
@@ -143,9 +150,9 @@ def test_stub_flag_is_removed_from_main_parser() -> None:
     """旧 `--stub` フラグは廃止済み (main.py のソースに残っていない)。"""
     src = Path(mortal.__file__).parent / "main.py"
     text = src.read_text(encoding="utf-8")
-    assert (
-        '"--stub"' not in text and "'--stub'" not in text
-    ), "--stub フラグが main.py に残っています (issue #18 で廃止)"
+    assert '"--stub"' not in text and "'--stub'" not in text, (
+        "--stub フラグが main.py に残っています (issue #18 で廃止)"
+    )
 
 
 def test_mortal_engine_module_has_no_top_level_torch_import() -> None:
@@ -163,3 +170,174 @@ def test_mortal_engine_module_has_no_top_level_torch_import() -> None:
             raise AssertionError(
                 f"top-level torch import 検出: {raw_line!r}; 遅延 import にしてください"
             )
+
+
+# --- issue #21: ROCm/CUDA → CPU 動的フォールバック ------------------------
+
+
+def test_is_cuda_runtime_error_matches_cuda_markers() -> None:
+    """`_is_cuda_runtime_error` が CUDA / ROCm 由来 RuntimeError を判定する。"""
+    assert _is_cuda_runtime_error(RuntimeError("CUDA error: device-side assert triggered"))
+    assert _is_cuda_runtime_error(RuntimeError("HIP error: invalid device function"))
+    assert _is_cuda_runtime_error(RuntimeError("CUDA out of memory."))
+    assert _is_cuda_runtime_error(RuntimeError("no CUDA-capable device is detected"))
+    assert _is_cuda_runtime_error(
+        RuntimeError("CUDA driver version is insufficient for CUDA runtime version")
+    )
+    assert _is_cuda_runtime_error(RuntimeError("CUDA initialization failed"))
+
+
+def test_is_cuda_runtime_error_rejects_non_cuda() -> None:
+    """state_dict shape mismatch 等の非 CUDA RuntimeError は False。"""
+    assert not _is_cuda_runtime_error(RuntimeError("size mismatch for layer.weight"))
+    assert not _is_cuda_runtime_error(RuntimeError("Error(s) in loading state_dict for Brain"))
+    assert not _is_cuda_runtime_error(ValueError("not a RuntimeError"))
+    assert not _is_cuda_runtime_error(None)
+
+
+def _install_fake_torch(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """`mortal.mortal_engine` の `importlib.import_module("torch")` 経路を
+    MagicMock 製の擬似 torch に差し替える。CUDA 利用可と装い、`device(...)` は
+    `.type` 属性に渡された文字列を持つ MagicMock を返す。
+    """
+    fake_torch = MagicMock(name="torch")
+    fake_torch.cuda.is_available.return_value = True
+
+    def _make_device(spec: str) -> MagicMock:
+        dev = MagicMock(name=f"device({spec!r})")
+        dev.type = spec
+        return dev
+
+    fake_torch.device.side_effect = _make_device
+
+    real_import_module = importlib.import_module
+
+    def fake_import_module(name: str, *args: object, **kwargs: object) -> object:
+        if name == "torch":
+            return fake_torch
+        return real_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr("mortal.mortal_engine.importlib.import_module", fake_import_module)
+    return fake_torch
+
+
+def test_load_falls_back_to_cpu_on_cuda_runtime_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`backend=rocm` で `_load_with_device` が CUDA error を上げたら CPU で再試行。
+
+    issue #21 受け入れ基準: `torch.cuda.is_available()==True` でも実際の
+    GPU 操作で `RuntimeError: CUDA error: ...` が飛ぶケース (ROCm 不安定環境)
+    を検知して、警告ログを出しながら CPU で 1 回だけリトライする。
+    """
+    _install_fake_torch(monkeypatch)
+
+    fake = tmp_path / "fake.pth"
+    fake.write_bytes(b"x")
+
+    calls: list[str] = []
+
+    def fake_load_with_device(
+        self_inner: MortalEngine,
+        torch_mod: object,
+        path: Path,
+        device: object,
+        *,
+        backend: str,
+    ) -> None:
+        del torch_mod, path, backend
+        dev_type = getattr(device, "type", None)
+        calls.append(str(dev_type))
+        if dev_type == "cuda":
+            raise ModelLoadError(f"failed to move model to {device}") from RuntimeError(
+                "CUDA error: device-side assert triggered"
+            )
+        # CPU 経路は成功扱い (実 vendor を呼ばずに ready 状態へ遷移)
+        self_inner._device = device
+        self_inner._version = 1
+        self_inner._ready = True
+
+    monkeypatch.setattr(MortalEngine, "_load_with_device", fake_load_with_device)
+
+    engine = MortalEngine()
+    with caplog.at_level("WARNING", logger="mortal.engine"):
+        engine.load(fake, backend="rocm")
+
+    assert calls == ["cuda", "cpu"], "GPU → CPU の順で 1 回ずつ呼ばれる"
+    assert engine.is_ready()
+    assert engine.device.type == "cpu"
+    assert any(
+        "CPU にフォールバック" in rec.message and "ROCm/CUDA 起動失敗" in rec.message
+        for rec in caplog.records
+    ), "フォールバック警告ログ (B7: python-log Tauri Event 経由で UI に届く) が出ていること"
+
+
+def test_load_does_not_retry_on_non_cuda_runtime_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """state_dict shape mismatch 等の非 CUDA RuntimeError は CPU 再試行しない。
+
+    CPU で再試行しても直らないので、原例外を `ModelLoadError` のままユーザに
+    返してプロセスを失敗させる方が誤魔化しがなく良い。
+    """
+    _install_fake_torch(monkeypatch)
+
+    fake = tmp_path / "fake.pth"
+    fake.write_bytes(b"x")
+
+    calls: list[str] = []
+
+    def fake_load_with_device(
+        self_inner: MortalEngine,
+        torch_mod: object,
+        path: Path,
+        device: object,
+        *,
+        backend: str,
+    ) -> None:
+        del self_inner, torch_mod, path, backend
+        calls.append(str(getattr(device, "type", None)))
+        raise ModelLoadError("state_dict load failed") from RuntimeError(
+            "size mismatch for layer.weight"
+        )
+
+    monkeypatch.setattr(MortalEngine, "_load_with_device", fake_load_with_device)
+
+    engine = MortalEngine()
+    with pytest.raises(ModelLoadError, match="state_dict load failed"):
+        engine.load(fake, backend="rocm")
+    assert calls == ["cuda"], "CPU リトライは起きない"
+
+
+def test_load_no_retry_when_backend_is_cpu(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`backend=cpu` 指定時は `device.type=="cpu"` なのでリトライ条件に入らない。"""
+    _install_fake_torch(monkeypatch)
+
+    fake = tmp_path / "fake.pth"
+    fake.write_bytes(b"x")
+
+    calls: list[str] = []
+
+    def fake_load_with_device(
+        self_inner: MortalEngine,
+        torch_mod: object,
+        path: Path,
+        device: object,
+        *,
+        backend: str,
+    ) -> None:
+        del self_inner, torch_mod, path, backend
+        calls.append(str(getattr(device, "type", None)))
+        # CPU 経路で起きた "CUDA error" は本来あり得ないが、防御的に
+        # それでも GPU リトライが走らないこと (= 同じ device で無限再試行
+        # にならないこと) を確認する。
+        raise ModelLoadError("simulated") from RuntimeError(
+            "CUDA error: should not trigger retry on cpu backend"
+        )
+
+    monkeypatch.setattr(MortalEngine, "_load_with_device", fake_load_with_device)
+
+    engine = MortalEngine()
+    with pytest.raises(ModelLoadError, match="simulated"):
+        engine.load(fake, backend="cpu")
+    assert calls == ["cpu"], "CPU 指定では 1 回しか呼ばれない"

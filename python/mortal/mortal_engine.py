@@ -95,6 +95,34 @@ def _resolve_device(torch: Any, backend: str) -> Any:
     raise ValueError(f"unknown backend: {backend!r} (expected 'rocm' | 'cuda' | 'cpu')")
 
 
+# CUDA/ROCm 起動失敗を表すエラーメッセージ部分文字列。`torch.cuda.is_available()`
+# が True を返した後、実際にカーネル起動やメモリ確保で `RuntimeError` が飛ぶ
+# 場合 (ROCm public preview のドライバ不整合・初期化失敗・GPU OOM 等) を
+# CPU フォールバックのトリガとして検出する。CPU で再試行しても直らない種類の
+# RuntimeError (state_dict shape mismatch 等) は素通しする。
+_CUDA_RUNTIME_ERROR_MARKERS: tuple[str, ...] = (
+    "CUDA error",
+    "CUDA driver",
+    "CUDA initialization",
+    "HIP error",
+    "no CUDA-capable device",
+    "out of memory",
+)
+
+
+def _is_cuda_runtime_error(exc: BaseException | None) -> bool:
+    """`RuntimeError` 系のうち CUDA/ROCm 由来かをメッセージで判定する。
+
+    `ModelLoadError.__cause__` 経由で渡される可能性があるため、引数は
+    `BaseException | None` を許容する。`None` や `RuntimeError` 以外は False。
+    """
+    if not isinstance(exc, RuntimeError):
+        return False
+    message = str(exc)
+    lower = message.lower()
+    return any(marker.lower() in lower for marker in _CUDA_RUNTIME_ERROR_MARKERS)
+
+
 class MortalEngine:
     """Mortal モデルのロード・推論をカプセル化するラッパ。
 
@@ -142,9 +170,17 @@ class MortalEngine:
     def load(self, model_path: str | Path, *, backend: str = "cpu") -> None:
         """`.pth` をロードして Brain/DQN を構築する。
 
+        `_resolve_device` が静的に CPU フォールバックする (= `torch.cuda.is_available()`
+        が False の) ケースに加え、`is_available()` が True を返したのに実際の
+        カーネル起動やメモリ確保で `RuntimeError: CUDA error: ...` が飛ぶ
+        ケース (ROCm public preview のドライバ不整合・初期化失敗・GPU OOM 等)
+        も検知して 1 回だけ CPU フォールバックを試みる。CPU 指定 (= 解決後の
+        `device.type == "cpu"`) のときはリトライ対象外。
+
         Raises:
             ModelLoadError: ファイル不在 / torch 未インストール /
-                vendor 未取得 / state_dict 不整合 / OOM 時。
+                vendor 未取得 / state_dict 不整合 / 非 CUDA 系 OOM 時。
+                CUDA 系で失敗したのち CPU リトライも失敗した場合も同様。
         """
         path = Path(model_path)
         # ファイル存在チェックは torch import 前に行うことで、エラーメッセージを
@@ -159,6 +195,33 @@ class MortalEngine:
             raise ModelLoadError("torch is not installed; run `uv sync --extra mortal`") from exc
 
         device = _resolve_device(torch, backend)
+        try:
+            self._load_with_device(torch, path, device, backend=backend)
+            return
+        except ModelLoadError as exc:
+            if device.type != "cuda" or not _is_cuda_runtime_error(exc.__cause__):
+                raise
+            logger.warning(
+                "ROCm/CUDA 起動失敗 (%s); CPU にフォールバックして再試行します",
+                exc.__cause__,
+            )
+        except RuntimeError as exc:
+            # `_load_with_device` 内の予期せぬ箇所から raw RuntimeError が
+            # 漏れた場合も同じ判定で受ける (防御的)。
+            if device.type != "cuda" or not _is_cuda_runtime_error(exc):
+                raise
+            logger.warning("ROCm/CUDA 起動失敗 (%s); CPU にフォールバックして再試行します", exc)
+
+        # CPU リトライ。失敗したら ModelLoadError がそのまま伝播する。
+        self._load_with_device(torch, path, torch.device("cpu"), backend=backend)
+
+    def _load_with_device(self, torch: Any, path: Path, device: Any, *, backend: str) -> None:
+        """指定 device にモデルをロードする本体処理。
+
+        `load()` から最初は GPU device で呼ばれ、CUDA 起動失敗時には CPU
+        device で再度呼ばれる。`backend` 引数はログ用 (元のユーザ指定が
+        "rocm" か "cpu" かを残すため)。
+        """
         logger.info(
             "MortalEngine: loading model from %s (device=%s, backend=%s)",
             path,
@@ -215,6 +278,8 @@ class MortalEngine:
         except RuntimeError as exc:
             # torch.cuda.OutOfMemoryError は torch>=2.4 で RuntimeError サブ
             # クラスなので、ここで一括して捕捉してメッセージを付け替える。
+            # `__cause__` に原因を残し、`load()` 側で CUDA 由来かどうかを
+            # `_is_cuda_runtime_error` で判定し CPU フォールバックを決める。
             raise ModelLoadError(f"failed to move model to {device}: {exc}") from exc
 
         # VendorEngine の __init__ で引数不整合 / リソース不足が起きても
@@ -231,6 +296,10 @@ class MortalEngine:
                 enable_rule_based_agari_guard=True,
                 name=self._name,
             )
+        except RuntimeError as exc:
+            # VendorEngine 構築中の CUDA 系 RuntimeError も `__cause__` 保持
+            # で上位 `load()` の CPU フォールバック対象にする。
+            raise ModelLoadError(f"failed to construct vendor MortalEngine: {exc}") from exc
         except Exception as exc:
             raise ModelLoadError(f"failed to construct vendor MortalEngine: {exc}") from exc
 
