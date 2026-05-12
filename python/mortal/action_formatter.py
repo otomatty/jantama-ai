@@ -66,12 +66,43 @@ _ACTION_LABEL_MAP: dict[str, str] = {
 # candidates から除外する閾値として使う。
 _LEGAL_POLICY_THRESHOLD = 1e-6
 
+# mjai 赤 5 表記 (libriichi 互換)。tile code parser でこの 3 文字を 1 牌として扱う。
+_RED_FIVES = frozenset({"5mr", "5pr", "5sr"})
+
+
+def _parse_tile_codes(s: str) -> list[str]:
+    """連結された mjai pai 表記を 1 牌ずつのリストに分解する。
+
+    通常は 2 文字 (`1m`/`9p`/`5s`/`1z` 等)、赤 5 のみ 3 文字 (`5mr`/`5pr`/`5sr`)。
+    libriichi の鳴きアクションは `pon:5m5m` / `ankan:5m5m5m5m` のように
+    連結表記で来るため、UI 表示用に先頭 1 牌を取り出すための前処理として使う。
+    """
+    tiles: list[str] = []
+    i = 0
+    while i < len(s):
+        if i + 3 <= len(s) and s[i : i + 3] in _RED_FIVES:
+            tiles.append(s[i : i + 3])
+            i += 3
+        elif i + 2 <= len(s):
+            tiles.append(s[i : i + 2])
+            i += 2
+        else:
+            # 末尾の余り 1 文字は壊れた入力。安全側で打ち切る。
+            break
+    return tiles
+
 
 def parse_mjai_action(action_str: str) -> dict[str, Any]:
     """mjai action 文字列を frontend `RecommendationCandidate` 互換 dict にパースする。
 
     返値の必須キー: `action_type` (ActionType enum 値), `raw_action`。
-    optional: `tile` (打牌 / 鳴き対象牌), `action_label` (日本語表示文)。
+    optional: `tile` (打牌 / 鳴き対象牌の先頭 1 牌), `action_label` (日本語表示文)。
+
+    `:` 後が複数牌の連結 (例 `pon:5m5m`) でも、UI 表示用には先頭 1 牌のみを
+    `tile` に入れる (issue #20 仕様: `pon:1m1m` → `tile="1m"`)。
+    フロントは action_type が pon/chi/kan/etc の場合 action_label を主表示と
+    するため、ここで生連結文字列をそのまま渡すと "5m5m" のような raw 表記が
+    UI に漏れるリスクがある (Codex on PR #52)。
 
     未知の prefix は安全側で `pass` 扱い + raw_action を保持する。
     """
@@ -89,9 +120,12 @@ def parse_mjai_action(action_str: str) -> dict[str, Any]:
         "raw_action": raw,
     }
     if tile_str:
-        # policy は called pai のみを emit するため、tile_str はそのまま 1 牌として
-        # 採用する。赤 5 ("5mr") も丸ごと尊重する。
-        parsed["tile"] = tile_str
+        # 鳴き系 (pon/chi/kan) や打牌で複数牌が連結されていても、表示用 tile は
+        # 先頭 1 牌のみを採用する (called pai / 打牌対象)。残り牌は raw_action に
+        # 温存しているため、デバッグや将来の詳細表示で参照可能。
+        tiles = _parse_tile_codes(tile_str)
+        if tiles:
+            parsed["tile"] = tiles[0]
     label = _ACTION_LABEL_MAP.get(prefix)
     if label:
         parsed["action_label"] = label

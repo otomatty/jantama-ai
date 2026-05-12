@@ -56,3 +56,35 @@ def test_handle_infer_end_to_end():
     # Rust 側 (monitor.rs:556) は recommended / candidates / timestamp / primary_label を読む。
     assert isinstance(result["timestamp"], str)
     assert isinstance(result["primary_label"], str) and result["primary_label"]
+
+
+def test_handle_infer_not_implemented_returns_error_response():
+    """CodeRabbit on PR #52: `_infer_real` の NotImplementedError がプロセスを
+    殺さず error 応答に変換されること。Phase D5 未実装期間にリアルモードで動かす
+    と毎回再起動ループに陥るのを防ぐ重要な契約。
+    """
+    engine = MortalEngine()  # stub=False のまま load しないので _infer_real が呼ばれる
+    engine._ready = True  # type: ignore[attr-defined]  # load() を skip して real path を直接叩く
+    converter = SnapshotToMjaiConverter()
+    req = {"type": "infer", "id": 7, "tenhou_json": stub_tenhou_json()}
+    result = handle_infer(engine, req, converter=converter)
+    assert result["type"] == "error"
+    assert result["id"] == 7
+    assert "Phase D5" in result["message"]
+
+
+def test_handle_infer_generic_exception_returns_error_response():
+    """汎用 Exception (= converter / engine がバグ等で予期せず raise) も
+    プロセスを殺さず error 応答に変換される。
+    """
+
+    class FailingEngine:
+        def infer(self, _events):
+            raise RuntimeError("simulated inference bug")
+
+    converter = SnapshotToMjaiConverter()
+    req = {"type": "infer", "id": 8, "tenhou_json": stub_tenhou_json()}
+    result = handle_infer(FailingEngine(), req, converter=converter)  # type: ignore[arg-type]
+    assert result["type"] == "error"
+    assert result["id"] == 8
+    assert "simulated inference bug" in result["message"]

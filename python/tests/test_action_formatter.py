@@ -42,12 +42,28 @@ def test_parse_reach() -> None:
 
 
 def test_parse_pon() -> None:
+    """issue #20 仕様: `pon:1m1m` → `tile="1m"` (先頭 1 牌のみ採用)。"""
     parsed = parse_mjai_action("pon:5m5m")
     assert parsed["action_type"] == "pon"
     assert parsed["action_label"] == "ポン"
-    # policy emit は called pai のみだが、libriichi が consumed を連結する場合もある。
-    # 本モジュールは `:` 後を丸ごと tile に入れる方針なので "5m5m" が入る。
-    assert parsed["tile"] == "5m5m"
+    # libriichi が consumed を連結して emit するが、UI 表示用には先頭 1 牌のみ。
+    # raw 連結 "5m5m" を tile に入れるとフロントで "5m5m" が描画される事故になる。
+    assert parsed["tile"] == "5m"
+
+
+def test_parse_pon_with_red_five() -> None:
+    """赤 5 を含む鳴き (`5mr` 3 文字) も先頭 1 牌として正しく切り出す。"""
+    parsed = parse_mjai_action("pon:5mr5m")
+    assert parsed["tile"] == "5mr"
+    parsed_normal_first = parse_mjai_action("pon:5m5mr")
+    assert parsed_normal_first["tile"] == "5m"
+
+
+def test_parse_ankan_takes_first_tile() -> None:
+    """ankan は同種 4 牌だが tile には先頭 1 牌のみ入れる。"""
+    parsed = parse_mjai_action("ankan:5m5m5m5m")
+    assert parsed["action_type"] == "kan"
+    assert parsed["tile"] == "5m"
 
 
 def test_parse_chi_variants_all_map_to_chi() -> None:

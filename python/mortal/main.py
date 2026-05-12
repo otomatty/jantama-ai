@@ -49,14 +49,31 @@ def handle_infer(
     2. `MortalEngine.infer(mjai_events)` で整形済みレスポンスを得る。
     3. `{"type": "result", "id": ...}` を付加して返す。
 
+    推論中の例外 (Phase D5 未実装の `NotImplementedError` や、変換失敗時の
+    予期せぬエラー等) はプロセスごと落とさず、プロトコル準拠の `error` 応答に
+    変換して返す (CodeRabbit on PR #52)。Rust monitor は `ProcessDied` 経由で
+    無限再起動ループに陥らないよう、`type=="error"` を観測したらエラー表示に
+    倒すだけで本プロセスは生かしておく契約。
+
     `converter` 引数はテスト時に独立インスタンスを差し込めるよう公開する。
     本番呼び出しではモジュールスコープの `_converter` がデフォルト。
     """
     req_id = req.get("id", -1)
     tenhou = req.get("tenhou_json", {})
     conv = converter if converter is not None else _converter
-    mjai_events = conv.convert(tenhou)
-    result = engine.infer(mjai_events)
+    try:
+        mjai_events = conv.convert(tenhou)
+        result = engine.infer(mjai_events)
+    except NotImplementedError as exc:
+        # Phase D5 (vendor.react_batch 配線) 未実装で発生するケース。
+        # 利用者には「モデル未対応」と分かるメッセージを返す。
+        logger.warning("infer not implemented: %s", exc)
+        return {"type": "error", "id": req_id, "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — プロセス生存を最優先
+        # 変換 / 推論で予期せぬ例外が起きた場合も、プロセスは生かして次の
+        # リクエストに備える。詳細はログで追えるよう exc_info を出す。
+        logger.exception("infer failed: %s", exc)
+        return {"type": "error", "id": req_id, "message": f"infer failed: {exc}"}
     return {"type": "result", "id": req_id, **result}
 
 
