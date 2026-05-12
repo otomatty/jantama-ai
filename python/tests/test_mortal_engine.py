@@ -150,9 +150,9 @@ def test_stub_flag_is_removed_from_main_parser() -> None:
     """旧 `--stub` フラグは廃止済み (main.py のソースに残っていない)。"""
     src = Path(mortal.__file__).parent / "main.py"
     text = src.read_text(encoding="utf-8")
-    assert '"--stub"' not in text and "'--stub'" not in text, (
-        "--stub フラグが main.py に残っています (issue #18 で廃止)"
-    )
+    assert (
+        '"--stub"' not in text and "'--stub'" not in text
+    ), "--stub フラグが main.py に残っています (issue #18 で廃止)"
 
 
 def test_mortal_engine_module_has_no_top_level_torch_import() -> None:

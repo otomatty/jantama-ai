@@ -198,19 +198,17 @@ class MortalEngine:
         try:
             self._load_with_device(torch, path, device, backend=backend)
             return
-        except ModelLoadError as exc:
-            if device.type != "cuda" or not _is_cuda_runtime_error(exc.__cause__):
+        except RuntimeError as exc:
+            # `ModelLoadError` は `RuntimeError` のサブクラスなので、ラップ済み
+            # (= `ModelLoadError`) と raw `RuntimeError` を 1 つの except で受ける。
+            # 判定対象は ModelLoadError なら原因例外 (`__cause__`)、raw なら自身。
+            cause = exc.__cause__ if isinstance(exc, ModelLoadError) else exc
+            if device.type != "cuda" or not _is_cuda_runtime_error(cause):
                 raise
             logger.warning(
                 "ROCm/CUDA 起動失敗 (%s); CPU にフォールバックして再試行します",
-                exc.__cause__,
+                cause,
             )
-        except RuntimeError as exc:
-            # `_load_with_device` 内の予期せぬ箇所から raw RuntimeError が
-            # 漏れた場合も同じ判定で受ける (防御的)。
-            if device.type != "cuda" or not _is_cuda_runtime_error(exc):
-                raise
-            logger.warning("ROCm/CUDA 起動失敗 (%s); CPU にフォールバックして再試行します", exc)
 
         # CPU リトライ。失敗したら ModelLoadError がそのまま伝播する。
         self._load_with_device(torch, path, torch.device("cpu"), backend=backend)
@@ -283,7 +281,9 @@ class MortalEngine:
             raise ModelLoadError(f"failed to move model to {device}: {exc}") from exc
 
         # VendorEngine の __init__ で引数不整合 / リソース不足が起きても
-        # ModelLoadError にラップする (PR #50 gemini review)。
+        # ModelLoadError にラップする (PR #50 gemini review)。`from exc` で
+        # `__cause__` を保持するので、CUDA 系 RuntimeError なら上位 `load()`
+        # の `_is_cuda_runtime_error` 判定経由で CPU フォールバック対象になる。
         try:
             self._engine = VendorEngine(
                 brain=brain,
@@ -296,10 +296,6 @@ class MortalEngine:
                 enable_rule_based_agari_guard=True,
                 name=self._name,
             )
-        except RuntimeError as exc:
-            # VendorEngine 構築中の CUDA 系 RuntimeError も `__cause__` 保持
-            # で上位 `load()` の CPU フォールバック対象にする。
-            raise ModelLoadError(f"failed to construct vendor MortalEngine: {exc}") from exc
         except Exception as exc:
             raise ModelLoadError(f"failed to construct vendor MortalEngine: {exc}") from exc
 
